@@ -1,5 +1,4 @@
 # gpt.cpp
-GPT2 implementation in c
 Correct gpt2 implementation in C.
 
 current benchmarks on 11thgencorei5:
