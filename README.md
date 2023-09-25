@@ -20,7 +20,7 @@ takes 2.7 seconds with unoptimised[openmp 8 threads] matrix multiplication.
 ```bash
 git clone https://github.com/Autobot37/gpt.cpp
 cd gpt.cpp
-g++ -ffast-math gpt.cpp -o run
+g++ -ffast-math gpt2.c -o run
 ./run
 ```
 
