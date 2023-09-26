@@ -24,7 +24,7 @@ more perfomance more optimization and more speed also more accurate
 ```bash
 git clone https://github.com/Autobot37/gpt.cpp
 cd gpt.cpp
-g++ -ffast-math gpt2.c -o run
+g++ -ffast-math -funsafe-loop-optimizations  -O3 gpt2.cpp -o run -lm -lstdc++
 ./run
 ```
 
