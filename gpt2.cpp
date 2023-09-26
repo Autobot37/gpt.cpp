@@ -7,6 +7,10 @@
 #include <assert.h>
 #include <random>
 #include <omp.h>
+#pragma GCC target("avx2")
+#pragma GCC optimize("O3")
+#include <x86intrin.h>
+
 
 using namespace std;
 
@@ -55,7 +59,7 @@ void add2d(float* a,float* b,int x,int y){
 }
 
 void matmul(float* out, float* in, float* w, int row1, int col1, int col2) {
-	#pragma omp parallel for private(i,j,k) shared(in,w,out) num_threads(8)
+	#pragma omp parallel for private(i,j,k) shared(in,w,out) num_threads(12)
     for (int i = 0; i < row1; i++) {
         for (int j = 0; j < col2; j++) {
             out[i * col2 + j] = 0.0;
@@ -457,11 +461,12 @@ float* forward(GPT* gpt,int* tokens){//input have to be blockSzie
 
 
 int main(){
+	clock_t start_time = clock();
 
 	GPT model;
 
 	model.config.block_size = 128;
-	model.config.vocab_size = 8092;
+	model.config.vocab_size = 4*8092;
 	model.config.n_embd = 128;
 	model.config.n_head = 4;
 	model.config.n_layer = 2;
@@ -494,10 +499,16 @@ int main(){
 
 	float* logits = forward(&model,tokens);
 
-    print_mat(logits,model.config.block_size,model.config.n_embd);
+    //print_mat(logits,model.config.block_size,model.config.vocab_size);
 
 	free(&model.runstate);
 	free(ptr);
+
+	clock_t end_time = clock();
+	double elapsed_time = (double)(end_time - start_time) / CLOCKS_PER_SEC;
+    printf("Elapsed time: %.2f seconds\n", elapsed_time);
+
+
 
 	return 0;
 }
