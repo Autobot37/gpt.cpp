@@ -1,3 +1,4 @@
+#include <cuda_runtime.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <ctype.h>
@@ -6,28 +7,34 @@
 #include <string.h>
 #include <assert.h>
 #include <random>
-#include <omp.h>
-#pragma GCC target("avx2")
-#pragma GCC optimize("O3")
-#include <x86intrin.h>
-
+#include <curand_kernel.h>
 
 using namespace std;
 
 #define max(a,b) (a>b)?a:b
 #define inf INFINITY;
 
-void init_random_matrix(float* mat, int rows, int cols) {
-	std::random_device rd;
-    std::mt19937 gen(rd());
-    std::uniform_real_distribution<float> distribution(0.0f, 1.0f);
 
-    for (int i = 0; i < rows; i++) {
-        for (int j = 0; j < cols; j++) {
-            mat[i * cols + j] = distribution(gen);
-        }
+__global__ void init_random_matrix_kernel(float* mat, int rows, int cols, unsigned int seed) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int j = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (i < rows && j < cols) {
+        curandState state;
+        curand_init(seed, i * cols + j, 0, &state);
+        mat[i * cols + j] = curand_uniform(&state);
     }
 }
+
+void init_random_matrix(float* mat, int rows, int cols) {
+    int threadsPerBlock = 256; // You can adjust this based on your GPU's capabilities
+    dim3 blocksPerGrid((rows + threadsPerBlock - 1) / threadsPerBlock, (cols + threadsPerBlock - 1) / threadsPerBlock);
+    unsigned int seed = time(NULL);
+
+    init_random_matrix_kernel<<<blocksPerGrid, threadsPerBlock>>>(mat, rows, cols, seed);
+    cudaDeviceSynchronize(); 
+}
+
 
 void print_mat(float* mat, int rows, int cols) {
 	printf("[%d, %d]\n",rows,cols);
@@ -44,33 +51,95 @@ float gelu(float x) {
     return 0.5 * x * (1.0 + tanhf(0.79788456f * (x + 0.044715f * x * x * x)));
 }
 
-void add(float* a,float* b, int sz){
-	for(int i = 0;i<sz;i++){
-		a[i]+=b[i];
-	}
-}
+__global__ void add_kernel(float* a, float* b, int sz) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
-void add2d(float* a,float* b,int x,int y){
-	for(int i = 0;i<x;i++){
-		for(int j=0;j<y;j++){
-			a[i*y+j] += b[i*y]+j;
-		}
-	}
-}
-
-void matmul(float* out, float* in, float* w, int row1, int col1, int col2) {
-	#pragma omp parallel for private(i,j,k) shared(in,w,out) num_threads(12)
-    for (int i = 0; i < row1; i++) {
-        for (int j = 0; j < col2; j++) {
-            out[i * col2 + j] = 0.0;
-            for (int k = 0; k < col1; k++) {
-            	assert(i*col2+j<row1*col2);
-            	assert(i*col1+k<row1*col1);
-            	assert(k*col2+j<col1*col2);
-                out[i * col2 + j] += in[i * col1 + k] * w[k * col2 + j];
-            }
-        }
+    if (idx < sz) {
+        a[idx] += b[idx];
     }
+}
+
+void add(float* a, float* b, int sz) {
+    float* d_a;
+    float* d_b;
+
+    cudaMalloc((void**)&d_a, sz * sizeof(float));
+    cudaMalloc((void**)&d_b, sz * sizeof(float));
+
+    cudaMemcpy(d_a, a, sz * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_b, b, sz * sizeof(float), cudaMemcpyHostToDevice);
+
+    int block_size = 256; // Adjust block size as needed
+    int num_blocks = (sz + block_size - 1) / block_size;
+
+    add_kernel<<<num_blocks, block_size>>>(d_a, d_b, sz);
+    cudaMemcpy(a, d_a, sz * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaFree(d_a);
+    cudaFree(d_b);
+}
+
+__global__ void add2d_kernel(float* a, float* b, int x, int y) {
+    int row = blockIdx.x * blockDim.x + threadIdx.x;
+    int col = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (row < x && col < y) {
+        a[row * y + col] += b[row * y + col] + col;
+    }
+}
+
+void add2d(float* a, float* b, int x, int y) {
+    float* d_a;
+    float* d_b; 
+    cudaMalloc((void**)&d_a, x * y * sizeof(float));
+    cudaMalloc((void**)&d_b, x * y * sizeof(float));
+    cudaMemcpy(d_a, a, x * y * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_b, b, x * y * sizeof(float), cudaMemcpyHostToDevice);
+
+    dim3 blockDim(16, 16);
+    dim3 gridDim((x + blockDim.x - 1) / blockDim.x, (y + blockDim.y - 1) / blockDim.y);
+
+    add2d_kernel<<<gridDim, blockDim>>>(d_a, d_b, x, y);
+    cudaMemcpy(a, d_a, x * y * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaFree(d_a);
+    cudaFree(d_b);
+}
+
+
+__global__ void c_matmul(float*c,float*a,float*b,int m,int n,int p){
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if(row<m && col<p){
+        float sum = 0.0f;
+        for(int i = 0;i<n;i++){
+            sum += a[n*row+i] * b[p*i + col];
+        }
+        c[row*p+col] = sum;
+    }
+}
+
+
+void matmul(float* out, float* in, float* w, int m, int n, int p) {
+	float*da,*db,*dc;
+	cudaMalloc((void**)&da,m*n*sizeof(float));
+  cudaMalloc((void**)&db,n*p*sizeof(float));
+  cudaMalloc((void**)&dc,m*p*sizeof(float));
+
+	cudaMemcpy(da,in, m*n*sizeof(float), cudaMemcpyHostToDevice);
+	cudaMemcpy(db,w,n*p*sizeof(float), cudaMemcpyHostToDevice);
+
+	dim3 blockDim(256,256);
+	dim3 gridDim((p+blockDim.x-1)/blockDim.x, (m+blockDim.y-1)/blockDim.y);
+
+	c_matmul<<<gridDim, blockDim>>>(da,db,dc,m,n,p);
+	cudaMemcpy(out,dc,m*p*sizeof(float),cudaMemcpyDeviceToHost);
+
+	cudaDeviceSynchronize();
+
+	cudaFree(da);
+	cudaFree(db);
+	cudaFree(dc);
+
 }
 
 void LayerNorm(float* x, float* weight, float* bias, int bsz, int n_embd) {
@@ -93,6 +162,8 @@ void LayerNorm(float* x, float* weight, float* bias, int bsz, int n_embd) {
         }
     }
 }
+
+
 
 typedef struct {
 	int block_size;
@@ -139,7 +210,7 @@ void init_weights(Weights* w,Config* p, float* ptr){
 	w->layernorm_bias = ptr;
 	ptr += p->n_layer * p->n_embd;
     init_random_matrix(w->layernorm_bias, n_layers, p->n_embd);
-	
+
 	w->c_attn = ptr;
 	ptr += p->n_layer * p->n_embd * 3*p->n_embd;
     init_random_matrix(w->c_attn, n_layers, 3 * p->n_embd * p->n_embd);
@@ -312,27 +383,27 @@ float* forward(GPT* gpt,int* tokens){//input have to be blockSzie
     		}
 
 			//print_mat(s->qv+i*block_size*head_size,block_size,head_size);
-		
+
 		//kv
     		for (int j=0; j<head_size; j++) {
         		for (int k=0; k<block_size; k++) {
             		s->kv[i*block_size*head_size+ j*block_size + k] = s->qkv[k*(3*n_embd) + 3*j + 1 + 6*i];
         		}
     		}
-		
+
 		//vv
     		for (int j=0; j<block_size; j++) {
         		for (int k=0; k<head_size; k++) {
             		s->vv[i*block_size*head_size+ j*head_size + k] = s->qkv[j*(3*n_embd) + 3*k + 2 + 6*i];
         		}
     		}
-		
+
 
 		// ///completed with ktranspose inbuilt
 
 		// ///now they are block of nh, block_size, head_size
 		// //k of n_head, head_size, block_size
-		
+
 		// ///att have to be in shape n_head,block_size, block_size
 
 
@@ -347,9 +418,9 @@ float* forward(GPT* gpt,int* tokens){//input have to be blockSzie
         	}
 
 			//print_mat(s->att+i*block_size*block_size,block_size,block_size);
-    	
 
-		
+
+
 		////attention matrix obtained
 
         	for(int j=0; j<block_size;j++){
@@ -386,7 +457,7 @@ float* forward(GPT* gpt,int* tokens){//input have to be blockSzie
         			s->att[i*block_size*block_size+j*block_size+n] /= row_sum;
         		}
         	}
-			
+
 			//print_mat(s->att+i*block_size*block_size,block_size,block_size);
 			//print_mat(s->vv+i*block_size*head_size,block_size,head_size);
 			//print_mat(s->y+i*head_size*block_size,block_size,head_size);//4,2 | 4,4 @ 4,2
@@ -394,7 +465,7 @@ float* forward(GPT* gpt,int* tokens){//input have to be blockSzie
 			int att_start = i * block_size * block_size;
      		int vv_start = i * block_size * head_size;
     		int y_start = i * block_size * head_size;
-			
+
     		matmul(s->y + y_start, s->att + att_start, s->vv + vv_start, block_size, block_size, head_size);
 			//print_mat(s->y + y_start, block_size, head_size);
         }
@@ -425,7 +496,7 @@ float* forward(GPT* gpt,int* tokens){//input have to be blockSzie
     	/////outed from causal attention
 
     	/////attention ends
-    	
+
 
     	add2d(s->out,s->res_emb,block_size,n_embd);
     	LayerNorm(s->out, w->layernorm2_weight + l*n_embd, w->layernorm2_bias + l*n_embd, block_size, n_embd);//block_size,n_embd
@@ -442,16 +513,16 @@ float* forward(GPT* gpt,int* tokens){//input have to be blockSzie
     	add2d(s->mlp2,s->res_emb,block_size,n_embd);
 
     	x = s->mlp2;
-    
+
 	}
     ///end all layers;
 	//print_mat(x,block_size,n_embd);
 	//print_mat(w->fin_layernorm_weight,1,n_embd);
 	//print_mat(w->fin_layernorm_bias,1,n_embd);
-    
+
 	LayerNorm(x,w->fin_layernorm_weight,w->fin_layernorm_bias,block_size,n_embd);
 	//print_mat(x,block_size,n_embd);
-	    
+
 	matmul(s->logits, x, w->lm_head_w,block_size, n_embd, c->vocab_size);//block_size .vocab_size <- block_siw,n_embd @ n_embd,vocab_size
 	free(bias);
 
@@ -465,13 +536,13 @@ int main(){
 
 	GPT model;
 
-	model.config.block_size = 8;
-	model.config.vocab_size = 8;
-	model.config.n_embd = 4;
-	model.config.n_head = 2;
-	model.config.n_layer = 2;
+	model.config.block_size = 1024;
+	model.config.vocab_size = 256*128;
+	model.config.n_embd = 256;
+	model.config.n_head = 8;
+	model.config.n_layer = 4;
 
-	int total_size = 
+	int total_size =
     model.config.vocab_size * model.config.n_embd +
     model.config.block_size * model.config.n_embd +
     model.config.n_layer * model.config.n_embd * 4 + // layernorm_weight, layernorm_bias, layernorm2_weight, layernorm2_bias, c_attn, c_proj
@@ -499,7 +570,7 @@ int main(){
 
 	float* logits = forward(&model,tokens);
 
-    print_mat(logits,model.config.block_size,model.config.vocab_size);
+    //print_mat(logits,model.config.block_size,model.config.vocab_size);
 
 	free(&model.runstate);
 	free(ptr);

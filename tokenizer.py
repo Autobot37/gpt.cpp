@@ -2,7 +2,8 @@ import os
 import struct
 import argparse
 from typing import List
-
+import torch
+print(torch.cuda.is_available())
 from sentencepiece import SentencePieceProcessor, SentencePieceTrainer
 
 MODEL = "tokenizer.model"
@@ -63,10 +64,10 @@ class Tokenizer:
         
 
    
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("-t","--tokensizer_model",type=str,help="path to tokenizer model")
-    args = parser.parse_args()
+# if __name__ == "__main__":
+#     parser = argparse.ArgumentParser()
+#     parser.add_argument("-t","--tokensizer_model",type=str,help="path to tokenizer model")
+#     args = parser.parse_args()
 
-    t = Tokenizer(args.tokenizer_model)
-    t.export()
+#     t = Tokenizer(args.tokenizer_model)
+#     t.export()
