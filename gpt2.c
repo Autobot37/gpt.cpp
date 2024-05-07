@@ -79,10 +79,10 @@ float* alloc_weights(Weights* params, int* param_sizes){
     }
     float* params_memory = (float*)calloc(num_params , sizeof(float));
     float** ptrs[] = {
-        &params->wte, &params->wpe, &params->ln_1_weight, &params->ln_1_bias,
+        &params->wte, &params->wpe, &params->ln_1_w, &params->ln_1_b,
         &params->c_attn_w, &params->c_attn_b, &params->c_proj_w, &params->c_proj_b,
-        &params->ln_2_weight, &params->ln_2_bias, &params->mlp_c_fc_w, &params->mlp_c_fc_b,
-        &params->mlp_c_proj_w, &params->mlp_c_proj_b, &params->ln_f_weight, &params->ln_f_bias
+        &params->ln_2_w, &params->ln_2_b, &params->mlp_c_fc_w, &params->mlp_c_fc_b,
+        &params->mlp_c_proj_w, &params->mlp_c_proj_b, &params->ln_f_w, &params->ln_f_b
     };
     float* iter = params_memory;
     for(int i = 0;i<NUM_TENSORS;i++){
@@ -92,7 +92,7 @@ float* alloc_weights(Weights* params, int* param_sizes){
     return params_memory;
 }
 
-#define NUM_ACTIVATIONS 14
+#define NUM_ACTIVATIONS 5
 
 typedef struct Activations {
     float* encoded;
@@ -100,15 +100,6 @@ typedef struct Activations {
     float* ln_1_mean;
     float* ln_1_rstd;
     float* qkv;
-    float* atty;
-    float* ln_2;
-    float* ln_2_mean;
-    float* ln_2_rstd;
-    float* mlp_c_fc;
-    float* mlp_c_proj;
-    float* ln_f;
-    float* ln_f_mean;
-    float* ln_f_rstd;
 }activations;
 
 void fill_act_sizes(int* act_sizes, Config config, int B){
@@ -117,6 +108,10 @@ void fill_act_sizes(int* act_sizes, Config config, int B){
     int T  = config.block_size;
     int L = config.n_layer;
     act_sizes[0] = B * T * C;
+    act_sizes[1] = B * T * C;
+    act_sizes[2] = B * T;
+    act_sizes[3] = B * T;
+    act_sizes[4] = B * T * 3 * C;
 }
 
 float* alloc_activations(activations* act, int* act_sizes){
@@ -129,7 +124,7 @@ float* alloc_activations(activations* act, int* act_sizes){
         printf("Activation memory assign failed\n");
     }
     float** ptrs[] = {
-        &act->encoded
+        &act->encoded, &act->ln_1, &act->ln_1_mean, &act->ln_1_rstd, &act->qkv
     };
     float* iter = act_memory;
     for(int i = 0;i<NUM_ACTIVATIONS;i++){
@@ -163,7 +158,6 @@ void encoder_backward(float* d_wpe, float* d_wte, int* inp, float* d_out, int B,
             float* d_out_p = d_out + b * T * C + t * C;
             float* d_wte_p = d_wte + inp[b * T + t] * C;
             float* d_wpe_p = d_wpe + t * C;
-            float* d_inp = inp + b * T + t;
             for(int i = 0;i<C;i++){
                 d_wte_p[i] += d_out[i];
                 d_wpe_p[i] += d_out[i];
@@ -417,11 +411,7 @@ void print_2d(float *arr, int dim1, int dim2) {
 }
 
 
-// void copy(float* dest, float* src, int dim){
-//     for(int i = 0;i<dim;i++){
-//         dest[i] = src[i];
-//     }
-// }
+
 
 // void add(float* c, float * a,float* b, int dim){
 //     for(int i=0;i<dim;i++){
@@ -429,109 +419,6 @@ void print_2d(float *arr, int dim1, int dim2) {
 //     }
 // }
 // //x.shape = batch_size, block_size, n_embd
-
-
-// void matmul(float* dest, float* a, float* b, int n, int m, int k) {
-//     for (int i = 0; i < n; ++i) {
-//         for (int j = 0; j < k; ++j) {
-//             float sum = 0.0;
-//             for (int l = 0; l < m; ++l) {
-//                 sum += a[i * m + l] * b[l * k + j];
-//             }
-//             dest[i * k + j] = sum;
-//         }
-//     }
-// }
-// //for 2d matrix params-> float* x, original dim1, original dim2 -> returns x (dim2, dim1)
-// void transpose(float* x, int n, int m) {
-//     float* temp = (float*)malloc(n * m * sizeof(float));
-//     if (temp == NULL) {
-//         return;
-//     }
-//     for (int i = 0; i < n; ++i) {
-//         for (int j = 0; j < m; ++j) {
-//             temp[j * n + i] = x[i * m + j];
-//         }
-//     }
-//     for (int i = 0; i < m; ++i) {
-//         for (int j = 0; j < n; ++j) {
-//             x[i * n + j] = temp[i * n + j];
-//         }
-//     }
-//     free(temp);
-// }
-
-// void softmax(float* x, int n, int m) {
-//     for (int i = 0; i < n; ++i) {
-//         float max_val = x[i * m];
-//         for (int j = 1; j < m; ++j) {
-//             if (x[i * m + j] > max_val) {
-//                 max_val = x[i * m + j];
-//             }
-//         }
-//         float sum_exp = 0.0;
-//         for (int j = 0; j < m; ++j) {
-//             x[i * m + j] -= max_val;
-//             sum_exp += exp(x[i * m + j]);
-//         }
-//         for (int j = 0; j < m; ++j) {
-//             x[i * m + j] = exp(x[i * m + j]) / sum_exp;
-//         }
-//     }
-// }
-
-// void gelu(float* x, int dim){
-//     for(int i = 0; i < dim; i++){
-//         float input = x[i];
-//         x[i] = 0.5f * input * (1.0f + tanh(sqrt(2.0f / M_PI) * (input + 0.044715f * pow(input, 3.0f))));
-//     }
-// }
-
-// void build_(Weights* weights, Config* config, char* path){
-//     FILE* model_file = fopen(path, "rb");
-//     if(model_file == NULL){printf("error opening file");exit(1);}
-//     int model_header[8];
-//     fread(model_header, sizeof(int), 8, model_file);
-//     if (model_header[0]!=3737){printf("another file");exit(1);}
-//     if (model_header[1] != 1){printf("another version"); exit(1); }
-
-//     int maxT, V, L, NH, C;
-//     config->block_size = maxT = model_header[2];
-//     config->vocab_size = V = model_header[3];
-//     config->n_layer = L = model_header[4];
-//     config->n_head = NH = model_header[5];
-//     config->n_embd = C = model_header[6];
-//     printf("[GPT-2]\n");
-//     printf("max_seq_len: %d\n", maxT);
-//     printf("vocab_size: %d\n", V);
-//     printf("num_layers: %d\n", L);
-//     printf("num_heads: %d\n", NH);
-//     printf("channels: %d\n", C);
-
-
-//     alloc_weights(weights,config);
-//     printf("weights allocated");
-
-//     //
-//     fread(weights->wte, sizeof(float), config->vocab_size * config->n_embd, model_file);
-//     fread(weights->wpe, sizeof(float), config->block_size * config->n_embd, model_file);
-
-//     for (int i = 0; i < L; i++) {
-//         fread(weights->ln_1_weight + i * config->n_embd, sizeof(float), config->n_embd, model_file);
-//         fread(weights->ln_1_bias + i * config->n_embd, sizeof(float), config->n_embd, model_file);
-//         fread(weights->c_attn + i * config->n_embd * 3 * config->n_embd, sizeof(float), 3 * config->n_embd * config->n_embd, model_file);
-//         fread(weights->c_proj + i * config->n_embd * config->n_embd, sizeof(float), config->n_embd * config->n_embd, model_file);
-//         fread(weights->ln_2_weight + i * config->n_embd, sizeof(float), config->n_embd, model_file);
-//         fread(weights->ln_2_bias + i * config->n_embd, sizeof(float), config->n_embd, model_file);
-//         fread(weights->mlp_c_fc + i * config->n_embd * 4 * config->n_embd, sizeof(float), 4 * config->n_embd * config->n_embd, model_file);
-//         fread(weights->mlp_c_proj + i * 4 * config->n_embd * config->n_embd, sizeof(float), 4 * config->n_embd * config->n_embd, model_file);
-//         fread(weights->ln_f_weight + i * config->n_embd, sizeof(float), config->n_embd, model_file);
-//         fread(weights->ln_f_bias + i * config->n_embd, sizeof(float), config->n_embd, model_file);
-//     }
-    
-//     fclose(model_file);
-
-// }
 int main(){
 
     Weights weights;
@@ -581,12 +468,12 @@ int main(){
         float* ln_l1_mean = act.ln_1_mean + l * B * T;
         float* ln_l1_rstd = act.ln_1_rstd + l * B * T;
         float* qkv_out = act.qkv + l * B * T * 3 * C;
-        float* atty = act.atty + l * B * T * C;
+        //float* atty = act.atty + l * B * T * C;
 
         layernorm_forward(ln_l_out, ln_l1_mean, ln_l1_rstd, act.encoded, ln_l_w, ln_l_b, B, T, C);
-        matmul_forward(qkv_out, ln_l_out, qkv_w, qkv_b, B, T, C);
-        attention_forward(atty, qkv_out, B, T, C, NH);
-        layernorm_forward();
+        //matmul_forward(qkv_out, ln_l_out, qkv_w, qkv_b, B, T, C);
+        //attention_forward(atty, qkv_out, B, T, C, NH);
+        //layernorm_forward();
 
 
 
@@ -594,47 +481,6 @@ int main(){
 
 
     }
-    //     add(x, attout, x, batch_size * config.block_size * config.n_embd);
-
-    //     ///ln_2
-    //     float* ln_2x = (float*)calloc(batch_size * config.block_size * config.n_embd, sizeof(float));
-    //     float* ln_w2 = &weights.ln_2_weight[layer * config.n_embd];
-    //     float* ln_b2 = &weights.ln_2_bias[layer * config.n_embd];
-    //     layernorm(ln_2x, x, ln_w2, ln_b2, batch_size, config.block_size, config.n_embd);
-
-    //     //mlping ln_2x
-    //     float* mlpout1 = (float*)calloc(batch_size * config.block_size * 4 * config.n_embd, sizeof(float));
-    //     for(int bsz=0;bsz<batch_size;bsz++){
-    //         float* a   = &ln_2x[bsz * config.block_size * config.n_embd];
-    //         float* b   = &weights.mlp_c_fc[layer * config.n_embd * 4 * config.n_embd];
-    //         float* out = &mlpout1[bsz * config.block_size * 4 * config.n_embd];
-    //         matmul(out, a, b, config.block_size, config.n_embd, 4 * config.n_embd);   
-    //     } 
-    //     //doing gelu
-    //     gelu(mlpout1, batch_size * config.block_size * 4 * config.n_embd);
-
-    //     float* mlpout = (float*)calloc(batch_size * config.block_size * config.n_embd, sizeof(float));
-    //     for(int bsz=0;bsz<batch_size;bsz++){
-    //         float* a   = &mlpout1[bsz * config.block_size * 4 * config.n_embd];
-    //         float* b   = &weights.mlp_c_proj[layer * 4 * config.n_embd  * config.n_embd];
-    //         float* out = &mlpout[bsz * config.block_size * config.n_embd];
-    //         matmul(out, a, b, config.block_size, 4 * config.n_embd, config.n_embd);   
-    //     } 
-
-    //     add(x, mlpout, x, batch_size * config.block_size * config.n_embd);
-    // }
-
-
-    // float* out = (float*)calloc(batch_size * config.block_size * config.vocab_size, sizeof(float));
-    // for(int bsz = 0;bsz<batch_size;bsz++){
-    //     float* y = &out[bsz * config.block_size * config.vocab_size];
-    //     float* a = &x[bsz * config.block_size * config.n_embd];
-    //     float* b = weights.lm_head;
-    //     matmul(y, a, b, config.block_size, config.n_embd, config.vocab_size);
-    // }
-
-    // print_3d(out, batch_size, config.block_size, config.vocab_size);
-
     printf("wet pants\n");
 
     return 0;
