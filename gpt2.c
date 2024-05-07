@@ -35,19 +35,6 @@ typedef struct TransformerWeights {
 
 #define NUM_TENSORS 16
 
-void rand_init(float* x, int dim){
-    srand(time(NULL));
-    for(int i = 0;i<dim;i++){
-        x[i] = (float)rand() / RAND_MAX;
-    }
-}
-
-void rand_init_int(int* x, int dim, int low, int high){
-    srand(time(NULL));
-    for(int i = 0;i<dim;i++){
-        x[i] = rand() % (high - low + 1) + low; 
-    }
-}
 
 void fill_param_sizes(int* param_sizes,  Config config){
     int V = config.vocab_size;
@@ -471,7 +458,7 @@ int main(){
         //float* atty = act.atty + l * B * T * C;
 
         layernorm_forward(ln_l_out, ln_l1_mean, ln_l1_rstd, act.encoded, ln_l_w, ln_l_b, B, T, C);
-        //matmul_forward(qkv_out, ln_l_out, qkv_w, qkv_b, B, T, C);
+        matmul_forward(qkv_out, ln_l_out, qkv_w, qkv_b, B, T, C);
         //attention_forward(atty, qkv_out, B, T, C, NH);
         //layernorm_forward();
 
