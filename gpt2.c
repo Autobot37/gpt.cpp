@@ -78,13 +78,14 @@ float* alloc_weights(Weights* params, int* param_sizes){
     return params_memory;
 }
 
-#define NUM_ACTIVATIONS 4
-
+#define NUM_ACTIVATIONS 5
 typedef struct Activations {
     float* encoded;
     float* ln_1;
     float* ln_1_mean;
     float* ln_1_rstd;
+    float* qkv;
+    float* atty;
 }activations;
 
 void fill_act_sizes(int* act_sizes, Config config, int B){
@@ -96,6 +97,8 @@ void fill_act_sizes(int* act_sizes, Config config, int B){
     act_sizes[1] = L * B * T * C;
     act_sizes[2] = L * B * T;
     act_sizes[3] = L * B * T;
+    act_sizes[4] = L * B * T * 3 * C;
+    act_sizes[5] = L * B * T * C;
 }
 
 float* alloc_activations(activations* act, int* act_sizes){
@@ -108,7 +111,8 @@ float* alloc_activations(activations* act, int* act_sizes){
         printf("Activation memory assign failed\n");
     }
     float** ptrs[] = {
-        &act->encoded, &act->ln_1, &act->ln_1_mean, &act->ln_1_rstd
+        &act->encoded, &act->ln_1, &act->ln_1_mean, &act->ln_1_rstd, &act->qkv,
+        &act->atty
     };
     float* iter = act_memory;
     for(int i = 0;i<NUM_ACTIVATIONS;i++){
@@ -148,13 +152,20 @@ int main(){
         //weights for layer l
         float* ln_l_w = weights.ln_1_w + l * C;
         float* ln_l_b = weights.ln_1_b + l * C;
+        float* c_attn_w = weights.c_attn_w + l * 3 * C * C;
+        float* c_attn_b = weights.c_attn_b + l * 3 * C;
+        float* c_proj_w = weights.c_proj_w + l * C * C;
+        float* c_proj_b = weights.c_proj_b + l * C;
         //activations for layer l
         float* ln_l_out = act.ln_1 + l * B * T * C;
         float* ln_l1_mean = act.ln_1_mean + l * B * T;
         float* ln_l1_rstd = act.ln_1_rstd + l * B * T;
-        //float* atty = act.atty + l * B * T * C;
+        float* qkv = act.qkv + l * B * T * 3 * C;
+        float* atty = act.atty + l * B * T * C;
 
         layernorm_forward(ln_l_out, ln_l1_mean, ln_l1_rstd, act.encoded, ln_l_w, ln_l_b, B, T, C);
+        matmul_forward(qkv, ln_l_out, c_attn_w, c_attn_b, B, T, C);
+        //attention_forward(qkv, )
     }
     printf("wet pants\n");
 
