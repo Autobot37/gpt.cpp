@@ -85,6 +85,8 @@ typedef struct Activations {
     float* ln_1_mean;
     float* ln_1_rstd;
     float* qkv;
+    float* preatt;
+    float* att;
     float* atty;
 }activations;
 
@@ -93,12 +95,15 @@ void fill_act_sizes(int* act_sizes, Config config, int B){
     int C = config.n_embd;
     int T  = config.block_size;
     int L = config.n_layer;
+    int NH = config.n_head;
     act_sizes[0] = B * T * C;
     act_sizes[1] = L * B * T * C;
     act_sizes[2] = L * B * T;
     act_sizes[3] = L * B * T;
     act_sizes[4] = L * B * T * 3 * C;
-    act_sizes[5] = L * B * T * C;
+    act_sizes[5] = L * B * NH * T * T;
+    act_sizes[6] = L * B * NH * T * T;
+    act_sizes[7] = L * B * T * C;
 }
 
 float* alloc_activations(activations* act, int* act_sizes){
@@ -112,7 +117,7 @@ float* alloc_activations(activations* act, int* act_sizes){
     }
     float** ptrs[] = {
         &act->encoded, &act->ln_1, &act->ln_1_mean, &act->ln_1_rstd, &act->qkv,
-        &act->atty
+        &act->preatt, &act->att, &act->atty
     };
     float* iter = act_memory;
     for(int i = 0;i<NUM_ACTIVATIONS;i++){
@@ -161,11 +166,13 @@ int main(){
         float* ln_l1_mean = act.ln_1_mean + l * B * T;
         float* ln_l1_rstd = act.ln_1_rstd + l * B * T;
         float* qkv = act.qkv + l * B * T * 3 * C;
+        float* preatt = act.preatt + l * B * NH * T * T;
+        float * att = act.att + l * B * NH * T * T;
         float* atty = act.atty + l * B * T * C;
 
         layernorm_forward(ln_l_out, ln_l1_mean, ln_l1_rstd, act.encoded, ln_l_w, ln_l_b, B, T, C);
         matmul_forward(qkv, ln_l_out, c_attn_w, c_attn_b, B, T, C);
-        //attention_forward(qkv, )
+        attention_forward(atty, preatt, att, qkv, B, T, C, NH);
     }
     printf("wet pants\n");
 
