@@ -191,7 +191,7 @@ void gpt_build(GPT* model, const char* path){
     model->config.n_head = NH = model_header[5];
     model->config.n_embd = C = model_header[6];
 
-    printf("[GPT-2]");
+    printf("[GPT-2]\n");
     printf("Block size: %d\n", T);
     printf("Vocab size: %d\n", V);
     printf("Number of layers: %d\n", L);
@@ -358,14 +358,15 @@ int main(){
             float* probs = model.act.probs + b * T * V + (T-1) * V;
             int max_ind = 0;
             float max_val = 1e-5f;
-            for(int i = 0;i<V;i++){
-                if(probs[i] > max_val){
-                    max_val = probs[i];
-                    max_ind = i;
+            for(int j = 0;j<V;j++){
+                if(probs[j] > max_val){
+                    max_val = probs[j];
+                    max_ind = j;
                 }
             }
             max_ind = ((int)rand() + i*i + i) % 40000;   
             printf("%s ", keys[max_ind]+2);
+            fflush(stdout);
             binputs = realloc(binputs, (T + 1) * sizeof(int));
             binputs = binputs + 1;
         }

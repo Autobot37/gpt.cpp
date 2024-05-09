@@ -9,11 +9,11 @@ import torch.nn.functional as F
 
 @dataclass
 class Config:
-    n_embd:int = 4
-    n_head:int = 2
-    block_size:int = 4
-    vocab_size:int = 8
-    n_layer:int = 2
+    n_embd:int = 32
+    n_head:int = 4
+    block_size:int = 128
+    vocab_size:int = 4096
+    n_layer:int = 4
 
 @dataclass
 class GPTConfig:
