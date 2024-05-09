@@ -2,6 +2,8 @@
 #include <stdlib.h>
 #include <time.h>
 #include <math.h>
+#include <string.h>
+#include <stdint.h>
 
 #include "kernels/kernels.h"
 
@@ -160,29 +162,132 @@ float* alloc_activations(activations* act, int* act_sizes){
     return act_memory;
 }
 
+typedef struct Transformer {
+    Weights weights;
+    activations act;
+    Config config;
+    int params_sizes[NUM_TENSORS];
+    int act_sizes[NUM_ACTIVATIONS];
+    float* params_memory;
+}GPT;
+
+
+void gpt_build(GPT* model, const char* path){
+    FILE* model_file = fopen(path, "rb");
+    if(model_file == NULL){
+        printf("Model file not found\n");
+        exit(1);
+    }   
+    int model_header[8];
+    fread(model_header, sizeof(int), 8, model_file);
+    if(model_header[0] != 3737){
+        printf("Model file not compatible\n");
+        exit(1);
+    }
+    int T, V, L, C, NH;
+    model->config.block_size = T = model_header[2];
+    model->config.vocab_size = V = model_header[3];
+    model->config.n_layer = L = model_header[4];
+    model->config.n_head = NH = model_header[5];
+    model->config.n_embd = C = model_header[6];
+
+    printf("[GPT-2]");
+    printf("Block size: %d\n", T);
+    printf("Vocab size: %d\n", V);
+    printf("Number of layers: %d\n", L);
+    printf("Number of heads: %d\n", NH);
+    printf("Embedding size: %d\n", C);
+
+    fill_param_sizes(model->params_sizes, model->config);
+
+    int num_params = 0;
+    for(int i = 0;i<NUM_TENSORS;i++){
+        num_params += model->params_sizes[i];
+    }
+    model->params_memory = alloc_weights(&model->weights, model->params_sizes);
+    fread(model->params_memory, sizeof(float), num_params, model_file);
+    fclose(model_file);
+}
+
 int main(){
 
-    Weights weights;
-    Config config;
-    int B, T, C, V, L, NH;
-    B = 4;
-    config.vocab_size = V =  4;
-    config.block_size = T = 4;
-    config.n_layer = L = 2;
-    config.n_head = NH = 2;
-    config.n_embd = C = 4;
-   
-    activations act;
+    FILE *file = fopen("dictionary.bin", "rb");
+    if (file == NULL) {
+        perror("Error opening file");
+        return 1;
+    }
+
+    // Read the entire file into memory
+    fseek(file, 0, SEEK_END);
+    long file_size = ftell(file);
+    fseek(file, 0, SEEK_SET);
+    uint8_t *buffer = (uint8_t *)malloc(file_size);
+    if (buffer == NULL) {
+        perror("Error allocating memory");
+        fclose(file);
+        return 1;
+    }
+    if (fread(buffer, 1, file_size, file) != file_size) {
+        perror("Error reading file");
+        free(buffer);
+        fclose(file);
+        return 1;
+    }
+    fclose(file);
+    int offset = 0;
+    int magic_num = *(int *)(buffer + offset);
+    offset += sizeof(int);
+    int dict_size = *(int *)(buffer + offset);
+    offset += sizeof(int);
+    printf("Magic number: %d\n", magic_num);
+    printf("Dictionary size: %d\n", dict_size);
+    char **keys = (char **)malloc(dict_size * sizeof(char *));
+    int *values = (int *)malloc(dict_size * sizeof(int));
+    if (keys == NULL || values == NULL) {
+        perror("Error allocating memory");
+        free(buffer);
+        return 1;
+    }
+    for (int i = 0; i < dict_size; i++) {
+        int key_size = *(int *)(buffer + offset);
+        offset += sizeof(int);
+        char *key = (char *)malloc((key_size + 1) * sizeof(char));
+        if (key == NULL) {
+            perror("Error allocating memory");
+            free(buffer);
+            return 1;
+        }
+        strncpy(key, (char *)(buffer + offset), key_size);
+        key[key_size] = '\0';  // Null-terminate the string
+        offset += key_size;
+        int val = *(int *)(buffer + offset);
+        offset += sizeof(int);
+        keys[i] = key;
+        values[i] = val;
+    }
+
+
+    GPT model;
     
-    int wt_sizes[NUM_TENSORS];
-    fill_param_sizes(wt_sizes, config);
-    alloc_weights(&weights, wt_sizes);
-    int act_sizes[NUM_ACTIVATIONS];
-    fill_act_sizes(act_sizes, config, B);
-    alloc_activations(&act, act_sizes);
-    int head_size = C / config.n_head;      
+    gpt_build(&model, "params.bin");
+    int T = model.config.block_size;
+    int V = model.config.vocab_size;
+    int NH = model.config.n_head;
+    int C = model.config.n_embd;
+    int L = model.config.n_layer;
+    int B = 2;
+    fill_act_sizes(model.act_sizes, model.config, B);
+    alloc_activations(&model.act, model.act_sizes);
+    
+    int head_size = C / NH;      
 
     int* input = (int*)calloc(B * T , sizeof(int));
+    for(int i = 0;i<B*T;i++){
+        input[i] = rand() % V;
+    }
+
+    Weights weights = model.weights;
+    activations act = model.act;
 
     float* residual = NULL;
     encoder_forward(act.encoded, input, weights.wte, weights.wpe, B, T, C);
@@ -235,8 +340,26 @@ int main(){
     layernorm_forward(act.ln_f, act.ln_f_mean, act.ln_f_rstd, residual, weights.ln_f_w, weights.ln_f_b, B, T, C);
     matmul_forward(act.logits, act.ln_f, weights.wte, NULL, B, T, C, V);
     softmax_forward(act.probs, act.logits, B, T, V);
-
     printf("wet pants\n");
 
+    //probs has a size B, T , V
+    float* probs = act.probs;
+    int max_ind = 0;
+    float max_val = 0.0f;
+    for(int i = 0;i<V;i++){
+        if(probs[i] > max_val){
+            max_val = probs[i];
+            max_ind = i;
+        }
+    }   
+    printf("Predicted word: %s\n", keys[max_ind]);
+
+    printf("Dictionary unpacked successfully:\n");
+    for (int i = 0; i < dict_size; i++) {
+        free(keys[i]);  
+    }
+    free(keys);
+    free(values);
+    free(buffer);
     return 0;
 }

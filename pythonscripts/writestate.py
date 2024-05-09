@@ -2,15 +2,41 @@ import numpy as np
 import torch
 from gpt2 import *
 
-def write_fp32(file_path, tensor):
-    with open(file_path, 'ab') as f:  
-        float32_data = tensor.detach().numpy().astype(np.float32)
-        f.write(float32_data.tobytes())
+def write_fp32(tensor, file):
+    t = tensor.detach().cpu().to(torch.float32)
+    b = t.numpy().tobytes()
+    file.write(b)
 
-def write_tensors(model, filename):
-    for name, params in model.named_parameters():
-        data = params.data.cpu().numpy()
-        write_fp32(filename, params)
+def write_tensors(model_tensors, L, file, dtype="float32"):
+    write_fun = write_fp32
+    write_fun(model_tensors["transformer.wte.weight"], file)
+    write_fun(model_tensors["transformer.wpe.weight"], file)
+    for i in range(L):
+        write_fun(model_tensors[f"transformer.h.{i}.ln_1.weight"], file)
+    for i in range(L):
+        write_fun(model_tensors[f"transformer.h.{i}.ln_1.bias"], file)
+    for i in range(L):
+        write_fun(model_tensors[f"transformer.h.{i}.attn.c_attn.weight"], file)
+    for i in range(L):
+        write_fun(model_tensors[f"transformer.h.{i}.attn.c_attn.bias"], file)
+    for i in range(L):
+        write_fun(model_tensors[f"transformer.h.{i}.attn.c_proj.weight"], file)
+    for i in range(L):
+        write_fun(model_tensors[f"transformer.h.{i}.attn.c_proj.bias"], file)
+    for i in range(L):
+        write_fun(model_tensors[f"transformer.h.{i}.ln_2.weight"], file)
+    for i in range(L):
+        write_fun(model_tensors[f"transformer.h.{i}.ln_2.bias"], file)
+    for i in range(L):
+        write_fun(model_tensors[f"transformer.h.{i}.mlp.c_fc.weight"], file)
+    for i in range(L):
+        write_fun(model_tensors[f"transformer.h.{i}.mlp.c_fc.bias"], file)
+    for i in range(L):
+        write_fun(model_tensors[f"transformer.h.{i}.mlp.c_proj.weight"], file)
+    for i in range(L):
+        write_fun(model_tensors[f"transformer.h.{i}.mlp.c_proj.bias"], file)
+    write_fun(model_tensors["transformer.ln_f.weight"], file)
+    write_fun(model_tensors["transformer.ln_f.bias"], file)
 
 def write_model(model, filename):
     header = torch.zeros(8, dtype=torch.int32)
@@ -21,9 +47,11 @@ def write_model(model, filename):
     header[4] = model.config.n_layer
     header[5] = model.config.n_head
     header[6] = model.config.n_embd
-    with open(filename, "wb") as file:
-        file.write(header.numpy().tobytes())
-        write_tensors(model, filename)
+    
+    params = {name : param.cpu() for name, param in model.named_parameters()}
+    with open(filename, "wb") as f:
+        f.write(header.numpy().tobytes())
+        write_tensors(params, model.config.n_layer, f)
     print(f"wrote {filename}")
 
 def write_state(model, x, y, logits, loss, filename):
@@ -32,3 +60,4 @@ def write_state(model, x, y, logits, loss, filename):
 gpt = GPT(Config)
 params_path = "params.bin"
 write_model(gpt, params_path)
+
