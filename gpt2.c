@@ -2,8 +2,10 @@
 #include <stdlib.h>
 #include <time.h>
 #include <math.h>
+#include <string.h>
+#include <stdint.h>
 
-#define M_PI 3.14159
+#include "kernels/kernels.h"
 
 typedef struct Config {
     int block_size;
@@ -17,45 +19,31 @@ typedef struct TransformerWeights {
 
     float* wte;
     float* wpe;
-    float* ln_1_weight;
-    float* ln_1_bias;    
+    float* ln_1_w;
+    float* ln_1_b;    
     float* c_attn_w;
     float* c_attn_b;
     float* c_proj_w;
     float* c_proj_b;
-    float* ln_2_weight;
-    float* ln_2_bias;
+    float* ln_2_w;
+    float* ln_2_b;
     float* mlp_c_fc_w;
     float* mlp_c_fc_b;
     float* mlp_c_proj_w;
     float* mlp_c_proj_b;
-    float* ln_f_weight;
-    float* ln_f_bias;
+    float* ln_f_w;
+    float* ln_f_b;
 }Weights;
 
 #define NUM_TENSORS 16
 
-void rand_init(float* x, int dim){
-    srand(time(NULL));
-    for(int i = 0;i<dim;i++){
-        x[i] = (float)rand() / RAND_MAX;
-    }
-}
-
-void rand_init_int(int* x, int dim, int low, int high){
-    srand(time(NULL));
-    for(int i = 0;i<dim;i++){
-        x[i] = rand() % (high - low + 1) + low; 
-    }
-}
-
 void fill_param_sizes(int* param_sizes,  Config config){
     int V = config.vocab_size;
     int C = config.n_embd;
-    int B  = config.block_size;
+    int T  = config.block_size;
     int L = config.n_layer;
     param_sizes[0] = V * C;
-    param_sizes[1] = B * C;
+    param_sizes[1] = T * C;
     param_sizes[2] = L * C;
     param_sizes[3] = L * C;
     param_sizes[4] = L * (3*C) * C;
@@ -77,427 +65,301 @@ float* alloc_weights(Weights* params, int* param_sizes){
     for(int i = 0;i<NUM_TENSORS;i++){
         num_params += param_sizes[i];
     }
-    float* params_memory = (float*)malloc(num_params * sizeof(float));
-    float* ptrs[] = {
-        params->wte, params->wpe, params->ln_1_weight, params->ln_1_bias,
-        params->c_attn_w, params->c_attn_b, params->c_proj_w, params->c_proj_b,
-        params->ln_2_weight, params->ln_2_bias, params->mlp_c_fc_w, params->mlp_c_fc_b,
-        params->mlp_c_proj_w, params->mlp_c_proj_b, params->ln_f_weight, params->ln_f_bias
+    float* params_memory = (float*)calloc(num_params , sizeof(float));
+    float** ptrs[] = {
+        &params->wte, &params->wpe, &params->ln_1_w, &params->ln_1_b,
+        &params->c_attn_w, &params->c_attn_b, &params->c_proj_w, &params->c_proj_b,
+        &params->ln_2_w, &params->ln_2_b, &params->mlp_c_fc_w, &params->mlp_c_fc_b,
+        &params->mlp_c_proj_w, &params->mlp_c_proj_b, &params->ln_f_w, &params->ln_f_b
     };
     float* iter = params_memory;
     for(int i = 0;i<NUM_TENSORS;i++){
-        ptrs[i] = iter;
+        *ptrs[i] = iter;
         iter += param_sizes[i];
     }
     return params_memory;
 }
-typedef struct activations {
 
-    int* input;
-    float* emb;
-
-
+#define NUM_ACTIVATIONS 22
+typedef struct Activations {
+    float* encoded;
+    float* ln_1;
+    float* ln_1_mean;
+    float* ln_1_rstd;
+    float* qkv;
+    float* preatt;
+    float* att;
+    float* atty;
+    float* attproj;
+    float* residual2;
+    float* ln_2 ;
+    float* ln_2_mean;
+    float* ln_2_rstd;
+    float* c_fc;
+    float* fc_gelu;
+    float* c_proj;
+    float* residual3;
+    float* ln_f;
+    float* ln_f_mean;
+    float* ln_f_rstd;
+    float* logits;
+    float* probs;
 }activations;
 
-// void print_3d(float *arr, int dim1, int dim2, int dim3) {
-//     printf("[\n");
-//     for (int i = 0; i < dim1; i++) {
-//         printf("  [\n");
-//         for (int j = 0; j < dim2; j++) {
-//             printf("    [ ");
-//             for (int k = 0; k < dim3; k++) {
-//                 printf("%.2f", *(arr + i * dim2 * dim3 + j * dim3 + k));
-//                 if (k < dim3 - 1) {
-//                     printf(", ");
-//                 }
-//             }
-//             printf(" ]\n");
-//         }
-//         printf("  ]\n");
-//     }
-//     printf("]\n");
-// }
+void fill_act_sizes(int* act_sizes, Config config, int B){
+    int V = config.vocab_size;
+    int C = config.n_embd;
+    int T  = config.block_size;
+    int L = config.n_layer;
+    int NH = config.n_head;
+    act_sizes[0] = B * T * C;
+    act_sizes[1] = L * B * T * C;
+    act_sizes[2] = L * B * T;
+    act_sizes[3] = L * B * T;
+    act_sizes[4] = L * B * T * 3 * C;
+    act_sizes[5] = L * B * NH * T * T;
+    act_sizes[6] = L * B * NH * T * T;
+    act_sizes[7] = L * B * T * C;
+    act_sizes[8] = L * B * T * C;
+    act_sizes[9] = L * B * T * C;
+    act_sizes[10] = L * B * T * C;
+    act_sizes[11] = L * B * T;
+    act_sizes[12] = L * B * T;
+    act_sizes[13] = L * B * T * 4 * C;
+    act_sizes[14] = L * B * T * 4 * C;
+    act_sizes[15] = L * B * T * C;
+    act_sizes[16] = L * B * T * C;
+    act_sizes[17] = B * T * C;
+    act_sizes[18] = B * T;
+    act_sizes[19] = B * T;
+    act_sizes[20] = B * T * V;
+    act_sizes[21] = B * T * V;
+}
 
-// void print_2d_int(int *arr, int dim1, int dim2) {
-//     printf("[\n");
-//     for (int i = 0; i < dim1; i++) {
-//         printf("  [ ");
-//         for (int j = 0; j < dim2; j++) {
-//             printf("%.2d", *(arr + i * dim2 + j));
-//             if (j < dim2 - 1) {
-//                 printf(", ");
-//             }
-//         }
-//         printf(" ]\n");
-//     }
-//     printf("]\n");
-// }
+float* alloc_activations(activations* act, int* act_sizes){
+    int num_activations = 0;
+    for(int i = 0;i<NUM_ACTIVATIONS;i++){
+        num_activations += act_sizes[i];
+    }
+    float* act_memory = (float*)calloc(num_activations , sizeof(float));
+    if(act_memory == NULL){
+        printf("Activation memory assign failed\n");
+    }
+    float** ptrs[] = {
+        &act->encoded, &act->ln_1, &act->ln_1_mean, &act->ln_1_rstd, &act->qkv,
+        &act->preatt, &act->att, &act->atty, &act->attproj,
+        &act->residual2, &act->ln_2, &act->ln_2_mean, &act->ln_2_rstd,
+        &act->c_fc, &act->fc_gelu, &act->c_proj,&act->residual3,
+        &act->ln_f, &act->ln_f_mean, &act->ln_f_rstd, &act->logits,
+        &act->probs
+    };
+    float* iter = act_memory;
+    for(int i = 0;i<NUM_ACTIVATIONS;i++){
+        *ptrs[i] = iter;
+        iter += act_sizes[i];
+    }
 
-// void print_2d(float *arr, int dim1, int dim2) {
-//     printf("[\n");
-//     for (int i = 0; i < dim1; i++) {
-//         printf("  [ ");
-//         for (int j = 0; j < dim2; j++) {
-//             printf("%.2f", *(arr + i * dim2 + j));
-//             if (j < dim2 - 1) {
-//                 printf(", ");
-//             }
-//         }
-//         printf(" ]\n");
-//     }
-//     printf("]\n");
-// }
+    return act_memory;
+}
 
-
-// void copy(float* dest, float* src, int dim){
-//     for(int i = 0;i<dim;i++){
-//         dest[i] = src[i];
-//     }
-// }
-
-// void add(float* c, float * a,float* b, int dim){
-//     for(int i=0;i<dim;i++){
-//         c[i] = a[i]+b[i];
-//     }
-// }
-// //x.shape = batch_size, block_size, n_embd
-// void layernorm(float* out, float* x, float* weight, float* bias, int batch_size, int block_size, int n_embd){
-//     for(int bsz = 0;bsz<batch_size;bsz++){
-//         float* y = &x[bsz*block_size*n_embd];
-//         float* outy = &out[bsz*block_size*n_embd];
-//         //now y is block_size,n_embd
-//         float* mean = (float*)calloc(n_embd, sizeof(float));
-//         float* std_dev = (float*)calloc(n_embd, sizeof(float));
-
-//         for(int j =0;j<n_embd;j++){
-//             float sum = 0.0f;
-//             for(int i=0;i<block_size;i++){
-//                 sum += y[i*n_embd + j];
-//             }
-//             mean[j] = sum/block_size;
-//         }
-
-//         for(int j = 0;j<n_embd;j++){
-//             float sum = 0.0f;
-//             for(int i = 0;i<block_size;i++){
-//                 float diff = y[i*n_embd + j] - mean[j];
-//                 sum += diff * diff;
-//             }
-//             std_dev[j] = sqrtf(sum / (block_size-1));
-//         }
-
-//         for(int i = 0;i<block_size;i++){
-//             for(int j = 0;j<n_embd;j++){
-//                 outy[i * n_embd + j] = ((y[i * n_embd + j] - mean[j]) / std_dev[j]) * weight[j] + bias[j];            }
-//         }
-
-//         free(mean);
-//         free(std_dev);
-//     }
-// }
-
-// void matmul(float* dest, float* a, float* b, int n, int m, int k) {
-//     for (int i = 0; i < n; ++i) {
-//         for (int j = 0; j < k; ++j) {
-//             float sum = 0.0;
-//             for (int l = 0; l < m; ++l) {
-//                 sum += a[i * m + l] * b[l * k + j];
-//             }
-//             dest[i * k + j] = sum;
-//         }
-//     }
-// }
-// //for 2d matrix params-> float* x, original dim1, original dim2 -> returns x (dim2, dim1)
-// void transpose(float* x, int n, int m) {
-//     float* temp = (float*)malloc(n * m * sizeof(float));
-//     if (temp == NULL) {
-//         return;
-//     }
-//     for (int i = 0; i < n; ++i) {
-//         for (int j = 0; j < m; ++j) {
-//             temp[j * n + i] = x[i * m + j];
-//         }
-//     }
-//     for (int i = 0; i < m; ++i) {
-//         for (int j = 0; j < n; ++j) {
-//             x[i * n + j] = temp[i * n + j];
-//         }
-//     }
-//     free(temp);
-// }
-
-// void softmax(float* x, int n, int m) {
-//     for (int i = 0; i < n; ++i) {
-//         float max_val = x[i * m];
-//         for (int j = 1; j < m; ++j) {
-//             if (x[i * m + j] > max_val) {
-//                 max_val = x[i * m + j];
-//             }
-//         }
-//         float sum_exp = 0.0;
-//         for (int j = 0; j < m; ++j) {
-//             x[i * m + j] -= max_val;
-//             sum_exp += exp(x[i * m + j]);
-//         }
-//         for (int j = 0; j < m; ++j) {
-//             x[i * m + j] = exp(x[i * m + j]) / sum_exp;
-//         }
-//     }
-// }
-
-// void gelu(float* x, int dim){
-//     for(int i = 0; i < dim; i++){
-//         float input = x[i];
-//         x[i] = 0.5f * input * (1.0f + tanh(sqrt(2.0f / M_PI) * (input + 0.044715f * pow(input, 3.0f))));
-//     }
-// }
-
-// void build_(Weights* weights, Config* config, char* path){
-//     FILE* model_file = fopen(path, "rb");
-//     if(model_file == NULL){printf("error opening file");exit(1);}
-//     int model_header[8];
-//     fread(model_header, sizeof(int), 8, model_file);
-//     if (model_header[0]!=3737){printf("another file");exit(1);}
-//     if (model_header[1] != 1){printf("another version"); exit(1); }
-
-//     int maxT, V, L, NH, C;
-//     config->block_size = maxT = model_header[2];
-//     config->vocab_size = V = model_header[3];
-//     config->n_layer = L = model_header[4];
-//     config->n_head = NH = model_header[5];
-//     config->n_embd = C = model_header[6];
-//     printf("[GPT-2]\n");
-//     printf("max_seq_len: %d\n", maxT);
-//     printf("vocab_size: %d\n", V);
-//     printf("num_layers: %d\n", L);
-//     printf("num_heads: %d\n", NH);
-//     printf("channels: %d\n", C);
+typedef struct Transformer {
+    Weights weights;
+    activations act;
+    Config config;
+    int params_sizes[NUM_TENSORS];
+    int act_sizes[NUM_ACTIVATIONS];
+    float* params_memory;
+}GPT;
 
 
-//     alloc_weights(weights,config);
-//     printf("weights allocated");
+void gpt_build(GPT* model, const char* path){
+    FILE* model_file = fopen(path, "rb");
+    if(model_file == NULL){
+        printf("Model file not found\n");
+        exit(1);
+    }   
+    int model_header[8];
+    fread(model_header, sizeof(int), 8, model_file);
+    if(model_header[0] != 3737){
+        printf("Model file not compatible\n");
+        exit(1);
+    }
+    int T, V, L, C, NH;
+    model->config.block_size = T = model_header[2];
+    model->config.vocab_size = V = model_header[3];
+    model->config.n_layer = L = model_header[4];
+    model->config.n_head = NH = model_header[5];
+    model->config.n_embd = C = model_header[6];
 
-//     //
-//     fread(weights->wte, sizeof(float), config->vocab_size * config->n_embd, model_file);
-//     fread(weights->wpe, sizeof(float), config->block_size * config->n_embd, model_file);
+    printf("[GPT-2]");
+    printf("Block size: %d\n", T);
+    printf("Vocab size: %d\n", V);
+    printf("Number of layers: %d\n", L);
+    printf("Number of heads: %d\n", NH);
+    printf("Embedding size: %d\n", C);
 
-//     for (int i = 0; i < L; i++) {
-//         fread(weights->ln_1_weight + i * config->n_embd, sizeof(float), config->n_embd, model_file);
-//         fread(weights->ln_1_bias + i * config->n_embd, sizeof(float), config->n_embd, model_file);
-//         fread(weights->c_attn + i * config->n_embd * 3 * config->n_embd, sizeof(float), 3 * config->n_embd * config->n_embd, model_file);
-//         fread(weights->c_proj + i * config->n_embd * config->n_embd, sizeof(float), config->n_embd * config->n_embd, model_file);
-//         fread(weights->ln_2_weight + i * config->n_embd, sizeof(float), config->n_embd, model_file);
-//         fread(weights->ln_2_bias + i * config->n_embd, sizeof(float), config->n_embd, model_file);
-//         fread(weights->mlp_c_fc + i * config->n_embd * 4 * config->n_embd, sizeof(float), 4 * config->n_embd * config->n_embd, model_file);
-//         fread(weights->mlp_c_proj + i * 4 * config->n_embd * config->n_embd, sizeof(float), 4 * config->n_embd * config->n_embd, model_file);
-//         fread(weights->ln_f_weight + i * config->n_embd, sizeof(float), config->n_embd, model_file);
-//         fread(weights->ln_f_bias + i * config->n_embd, sizeof(float), config->n_embd, model_file);
-//     }
-    
-//     fclose(model_file);
+    fill_param_sizes(model->params_sizes, model->config);
 
-// }
+    int num_params = 0;
+    for(int i = 0;i<NUM_TENSORS;i++){
+        num_params += model->params_sizes[i];
+    }
+    model->params_memory = alloc_weights(&model->weights, model->params_sizes);
+    fread(model->params_memory, sizeof(float), num_params, model_file);
+    fclose(model_file);
+}
+
 int main(){
 
-    Weights weights;
-    Config config;
-    int batch_size = 2;
-    config.vocab_size = 4;
-    config.block_size = 4;
-    config.n_layer = 2;
-    config.n_head = 2;
-    config.n_embd = 4;
+    FILE *file = fopen("dictionary.bin", "rb");
+    if (file == NULL) {
+        perror("Error opening file");
+        return 1;
+    }
 
-    activations act;
+    // Read the entire file into memory
+    fseek(file, 0, SEEK_END);
+    long file_size = ftell(file);
+    fseek(file, 0, SEEK_SET);
+    uint8_t *buffer = (uint8_t *)malloc(file_size);
+    if (buffer == NULL) {
+        perror("Error allocating memory");
+        fclose(file);
+        return 1;
+    }
+    if (fread(buffer, 1, file_size, file) != file_size) {
+        perror("Error reading file");
+        free(buffer);
+        fclose(file);
+        return 1;
+    }
+    fclose(file);
+    int offset = 0;
+    int magic_num = *(int *)(buffer + offset);
+    offset += sizeof(int);
+    int dict_size = *(int *)(buffer + offset);
+    offset += sizeof(int);
+    printf("Magic number: %d\n", magic_num);
+    printf("Dictionary size: %d\n", dict_size);
+    char **keys = (char **)malloc(dict_size * sizeof(char *));
+    int *values = (int *)malloc(dict_size * sizeof(int));
+    if (keys == NULL || values == NULL) {
+        perror("Error allocating memory");
+        free(buffer);
+        return 1;
+    }
+    for (int i = 0; i < dict_size; i++) {
+        int key_size = *(int *)(buffer + offset);
+        offset += sizeof(int);
+        char *key = (char *)malloc((key_size + 1) * sizeof(char));
+        if (key == NULL) {
+            perror("Error allocating memory");
+            free(buffer);
+            return 1;
+        }
+        strncpy(key, (char *)(buffer + offset), key_size);
+        key[key_size] = '\0';  // Null-terminate the string
+        offset += key_size;
+        int val = *(int *)(buffer + offset);
+        offset += sizeof(int);
+        keys[i] = key;
+        values[i] = val;
+    }
+
+
+    GPT model;
     
-    int sizes[16];
-    fill_param_sizes(sizes, config);
-    alloc_weights(&weights, sizes);
-    int head_size = config.n_embd / config.n_head;
+    gpt_build(&model, "params.bin");
+    int T = model.config.block_size;
+    int V = model.config.vocab_size;
+    int NH = model.config.n_head;
+    int C = model.config.n_embd;
+    int L = model.config.n_layer;
+    int B = 2;
+    fill_act_sizes(model.act_sizes, model.config, B);
+    alloc_activations(&model.act, model.act_sizes);
+    
+    int head_size = C / NH;      
 
+    int* input = (int*)calloc(B * T , sizeof(int));
+    for(int i = 0;i<B*T;i++){
+        input[i] = rand() % V;
+    }
 
-    //tril buffer
-    // float* bias = (float*)calloc(config.block_size * config.block_size , sizeof(float));
-    // rand_init(bias, config.block_size * config.block_size);
-    // for(int i = 0;i<config.block_size;i++){
-    //     for(int j = 0;j<i;j++){
-    //         bias[i * config.block_size + j] = 0.0;
-    //     }
-    // }
-    // //input.shape  =  batch_size, block_size
-    // act.input = (int*)calloc(batch_size * config.block_size , sizeof(int));
-    // rand_init_int(act.input, batch_size * config.block_size,0,config.vocab_size);
+    Weights weights = model.weights;
+    activations act = model.act;
 
-    // float* wte = (float*)calloc(batch_size * config.block_size * config.n_embd, sizeof(float));
-    // for(int i = 0;i<batch_size;i++){
-    //     for(int j = 0;j<config.block_size;j++){
-    //         copy(&wte[i * config.block_size * config.n_embd + j * config.n_embd] , &weights.wte[act.input[i * config.block_size + j]], config.n_embd);
-    //     }
-    // };
+    float* residual = NULL;
+    encoder_forward(act.encoded, input, weights.wte, weights.wpe, B, T, C);
+    for(int l=0; l<L; l++){
 
-    // float* wpe = (float*)calloc(batch_size * config.block_size * config.n_embd, sizeof(float));
-    // for(int i = 0;i<batch_size;i++){
-    //     for(int j = 0;j<config.block_size;j++){
-    //         copy(&wpe[i * config.block_size * config.n_embd + j * config.n_embd] , &weights.wpe[j], config.n_embd);
-    //     }
-    // };
+        residual = (l==0) ? act.encoded : act.residual3 + (l-1) * B * T * C;
+        //weights for layer l
+        float* ln_l1_w = weights.ln_1_w + l * C;
+        float* ln_l1_b = weights.ln_1_b + l * C;
+        float* c_attn_w = weights.c_attn_w + l * 3 * C * C;
+        float* c_attn_b = weights.c_attn_b + l * 3 * C;
+        float* c_proj_w = weights.c_proj_w + l * C * C;
+        float* c_proj_b = weights.c_proj_b + l * C;
+        float* ln_l2_w = weights.ln_2_w + l * C;
+        float* ln_l2_b = weights.ln_2_b + l * C;
+        float* c_fc_w = weights.mlp_c_fc_w + l * 4 * C * C;
+        float* c_fc_b = weights.mlp_c_fc_b + l * 4 * C;
+        float* mlp_proj_w = weights.mlp_c_proj_w + l * 4 * C * C;
+        float* mlp_proj_b = weights.mlp_c_proj_b + l * C;
+        //activations for layer l
+        float* ln_l1_out = act.ln_1 + l * B * T * C;
+        float* ln_l1_mean = act.ln_1_mean + l * B * T;
+        float* ln_l1_rstd = act.ln_1_rstd + l * B * T;
+        float* qkv = act.qkv + l * B * T * 3 * C;
+        float* preatt = act.preatt + l * B * NH * T * T;
+        float * att = act.att + l * B * NH * T * T;
+        float* atty = act.atty + l * B * T * C;
+        float* attproj = act.attproj + l * B * T * C;
+        float* residual2 = act.residual2 + l* B * T * C;
+        float* ln_l2_out = act.ln_2 + l * B * T * C;
+        float* ln_l2_mean = act.ln_2_mean + l * B * T;
+        float* ln_l2_rstd = act.ln_2_rstd + l * B * T;
+        float* c_fc = act.c_fc + l * B * T * 4 * C;
+        float* fc_gelu = act.fc_gelu + l * B * T * 4 * C;
+        float* c_proj = act.c_proj + l * B * T * C;
+        float* residual3 = act.residual3 + l * B * T * C;
 
-    // float* x = (float*)calloc(batch_size * config.block_size * config.n_embd, sizeof(float));
-    // add(x,wte,wpe,batch_size * config.block_size * config.n_embd);
-
-    // //attention blocks
-    // for(int layer = 0;layer<config.n_layer;layer++){
-    //     float* ln_1x = (float*)calloc(batch_size * config.block_size * config.n_embd, sizeof(float));
-    //     float* ln_w1 = &weights.ln_1_weight[layer * config.n_embd];
-    //     float* ln_b1 = &weights.ln_1_bias[layer * config.n_embd];
-    //     layernorm(ln_1x, x, ln_w1, ln_b1, batch_size, config.block_size, config.n_embd);
-
-    //     //c_attn(x): block_size,block_size , n_embd @ n_embd , 3*n_embd -> batch_size, block_size, 3 * n_embd
-    //     float* qkv = (float*)calloc(batch_size * config.block_size * 3 * config.n_embd, sizeof(float));
-    //     for(int bsz = 0;bsz<batch_size;bsz++){
-    //         float* a = &ln_1x[bsz * config.block_size * config.n_embd];
-    //         float* b = &weights.c_attn[layer * config.n_embd * 3 * config.n_embd];
-    //         float* qkvout = &qkv[bsz * config.block_size * 3 * config.n_embd];
-    //         //y->block_size,n_embd @ w->c_attn->n_embd , 3 * n_embd
-    //         matmul(qkvout, a, b, config.block_size, config.n_embd, 3 * config.n_embd);
-    //     }
-
-    //     float* q = (float*)calloc(batch_size * config.block_size * config.n_embd, sizeof(float));
-    //     float* k = (float*)calloc(batch_size * config.block_size * config.n_embd, sizeof(float));
-    //     float* v = (float*)calloc(batch_size * config.block_size * config.n_embd, sizeof(float));
-    //     for(int bsz = 0;bsz<batch_size;bsz++){
-    //         for(int blk = 0;blk<config.block_size;blk++){
-    //             copy(&q[bsz * config.block_size * config.n_embd + blk * config.n_embd], &qkv[bsz * config.block_size * 3 * config.n_embd + blk * 3 * config.n_embd + 0 * config.n_embd], config.n_embd);
-    //             copy(&k[bsz * config.block_size * config.n_embd + blk * config.n_embd], &qkv[bsz * config.block_size * 3 * config.n_embd + blk * 3 * config.n_embd + 1 * config.n_embd], config.n_embd);
-    //             copy(&v[bsz * config.block_size * config.n_embd + blk * config.n_embd], &qkv[bsz * config.block_size * 3 * config.n_embd + blk * 3 * config.n_embd + 2 * config.n_embd], config.n_embd);
-    //         }
-    //     }
-    //     //splitting completed;
-    //     float* att = (float*)calloc(batch_size * config.n_head * config.block_size * config.block_size, sizeof(float));
-
-    //     for(int bsz = 0;bsz<batch_size;bsz++){
-    //         for(int head = 0;head < config.n_head;head++){
-    //             float* out = &att[bsz * config.n_head * config.block_size * config.block_size + head * config.block_size * config.block_size];
-    //             float* a   = &q[bsz * config.n_head * config.block_size * head_size + head * config.block_size * head_size];
-    //             float* b   = &k[bsz * config.n_head * config.block_size * head_size + head * config.block_size * head_size];
-    //             transpose(b, config.block_size, head_size);
-    //             matmul(out, a, b, config.block_size, head_size, config.block_size);
-    //         }
-    //     }
-    //     for(int at = 0;at<batch_size * config.n_head * config.block_size * config.block_size;at++){
-    //         att[at] *= (1.0 / sqrtf(head_size));
-    //     }
-    //     //att completed
-    //     for(int bsz = 0;bsz<batch_size;bsz++){
-    //         for(int head = 0;head<config.n_head;head++){
-    //             float* y = &att[bsz * config.n_head * config.block_size * config.block_size + head * config.block_size * config.block_size];
-    //             for(int _i = 0;_i<config.block_size;_i++){
-    //                 for(int _j = 0;_j<config.block_size;_j++){
-    //                     if(bias[_i*config.block_size + _j]==0.0){
-    //                         y[_i*config.block_size + _j] = -1.0 * __LONG_LONG_MAX__;
-    //                     }
-    //                 }
-    //             }
-    //         }
-    //     }
-    //     //trilled
-    //     for(int bsz = 0;bsz<batch_size;bsz++){
-    //         for(int head=0;head<config.n_head;head++){
-    //             float* y = &att[bsz * config.n_head * config.block_size * config.block_size + head * config.block_size * config.block_size];
-    //             softmax(y, config.block_size, config.block_size);
-    //         }
-    //     }
-    //     //softmaxed
-    //     float* y = (float*)calloc(batch_size * config.n_head * config.block_size * head_size, sizeof(float));
-    //     for(int bsz = 0;bsz<batch_size;bsz++){
-    //         for(int head=0;head<config.n_head;head++){
-    //             float* out = &y[bsz * config.n_head * config.block_size * head_size + head * config.block_size * head_size];
-    //             float* a =   &att[bsz * config.n_head * config.block_size * config.block_size + head * config.block_size * config.block_size];
-    //             float* b =   &v[bsz * config.n_head * config.block_size * head_size + head * config.block_size * head_size];
-    //             matmul(out, a, b, config.block_size, config.block_size, head_size);
-    //         }
-    //     }
-    //     //did att @ v
-    //     ////now doing bsz,n_heads,block_size,head_size to bsz,block_size, n_heads,head_size
-    //     float* temp = (float*)malloc(batch_size * config.block_size * config.n_head * head_size * sizeof(float));
-
-    //     // Perform the transpose operation
-    //     for (int bsz = 0; bsz < batch_size; ++bsz) {
-    //         for (int blk = 0; blk < config.block_size; ++blk) {
-    //             for (int nh = 0; nh < config.n_head; ++nh) {
-    //                 for (int hs = 0; hs < head_size; ++hs) {
-    //                     int index_input = bsz * config.n_head * config.block_size * head_size +
-    //                                     nh * config.block_size * head_size +
-    //                                     blk * head_size +
-    //                                     hs;
-    //                     int index_output = bsz * config.block_size * config.n_head * head_size +
-    //                                     blk * config.n_head * head_size +
-    //                                     nh * head_size +
-    //                                     hs;
-    //                     temp[index_output] = y[index_input];
-    //                 }
-    //             }
-    //         }
-    //     }
-    //     for (int i = 0; i < batch_size * config.block_size * config.n_head * head_size; ++i) {
-    //         y[i] = temp[i];
-    //     }
-    //     free(temp);
-
-    //     ////ok ctgs
-
-    //     float* attout = (float*)calloc(batch_size * config.block_size * config.n_embd, sizeof(float));
-    //     for(int bsz = 0;bsz<batch_size;bsz++){
-    //         float* y = &attout[bsz * config.block_size * config.n_embd];
-    //         float* a = &y[bsz * config.block_size * config.n_embd];
-    //         float* b = &weights.c_proj[layer * config.n_embd * config.n_embd];
-    //         matmul(y, a , b, config.block_size, config.n_embd, config.n_embd);
-    //     }
-
-    //     //////attention completed
-    //     add(x, attout, x, batch_size * config.block_size * config.n_embd);
-
-    //     ///ln_2
-    //     float* ln_2x = (float*)calloc(batch_size * config.block_size * config.n_embd, sizeof(float));
-    //     float* ln_w2 = &weights.ln_2_weight[layer * config.n_embd];
-    //     float* ln_b2 = &weights.ln_2_bias[layer * config.n_embd];
-    //     layernorm(ln_2x, x, ln_w2, ln_b2, batch_size, config.block_size, config.n_embd);
-
-    //     //mlping ln_2x
-    //     float* mlpout1 = (float*)calloc(batch_size * config.block_size * 4 * config.n_embd, sizeof(float));
-    //     for(int bsz=0;bsz<batch_size;bsz++){
-    //         float* a   = &ln_2x[bsz * config.block_size * config.n_embd];
-    //         float* b   = &weights.mlp_c_fc[layer * config.n_embd * 4 * config.n_embd];
-    //         float* out = &mlpout1[bsz * config.block_size * 4 * config.n_embd];
-    //         matmul(out, a, b, config.block_size, config.n_embd, 4 * config.n_embd);   
-    //     } 
-    //     //doing gelu
-    //     gelu(mlpout1, batch_size * config.block_size * 4 * config.n_embd);
-
-    //     float* mlpout = (float*)calloc(batch_size * config.block_size * config.n_embd, sizeof(float));
-    //     for(int bsz=0;bsz<batch_size;bsz++){
-    //         float* a   = &mlpout1[bsz * config.block_size * 4 * config.n_embd];
-    //         float* b   = &weights.mlp_c_proj[layer * 4 * config.n_embd  * config.n_embd];
-    //         float* out = &mlpout[bsz * config.block_size * config.n_embd];
-    //         matmul(out, a, b, config.block_size, 4 * config.n_embd, config.n_embd);   
-    //     } 
-
-    //     add(x, mlpout, x, batch_size * config.block_size * config.n_embd);
-    // }
-
-
-    // float* out = (float*)calloc(batch_size * config.block_size * config.vocab_size, sizeof(float));
-    // for(int bsz = 0;bsz<batch_size;bsz++){
-    //     float* y = &out[bsz * config.block_size * config.vocab_size];
-    //     float* a = &x[bsz * config.block_size * config.n_embd];
-    //     float* b = weights.lm_head;
-    //     matmul(y, a, b, config.block_size, config.n_embd, config.vocab_size);
-    // }
-
-    // print_3d(out, batch_size, config.block_size, config.vocab_size);
-
+        layernorm_forward(ln_l1_out, ln_l1_mean, ln_l1_rstd, act.encoded, ln_l1_w, ln_l1_b, B, T, C);
+        matmul_forward(qkv, ln_l1_out, c_attn_w, c_attn_b, B, T, C, C);
+        attention_forward(atty, preatt, att, qkv, B, T, C, NH);
+        matmul_forward(attproj, atty, c_proj_w, c_proj_b, B, T, C, C);
+        residual_forward(residual2, residual, attproj, B*T*C);
+        layernorm_forward(ln_l2_out, ln_l2_mean, ln_l2_rstd, residual2, ln_l2_w, ln_l2_b, B, T, C);
+        matmul_forward(c_fc, ln_l2_out, c_fc_w, c_fc_b, B, T, C, 4*C);
+        gelu_forward(fc_gelu, c_fc, B*T*4*C);
+        matmul_forward(c_proj, fc_gelu, mlp_proj_w, mlp_proj_b, B, T, 4*C, C);
+        residual_forward(residual3, residual2, c_proj, B*T*C);
+    }
+    residual = act.residual3 + (L-1) * B * T * C;
+    layernorm_forward(act.ln_f, act.ln_f_mean, act.ln_f_rstd, residual, weights.ln_f_w, weights.ln_f_b, B, T, C);
+    matmul_forward(act.logits, act.ln_f, weights.wte, NULL, B, T, C, V);
+    softmax_forward(act.probs, act.logits, B, T, V);
     printf("wet pants\n");
 
+    //probs has a size B, T , V
+    float* probs = act.probs;
+    int max_ind = 0;
+    float max_val = 0.0f;
+    for(int i = 0;i<V;i++){
+        if(probs[i] > max_val){
+            max_val = probs[i];
+            max_ind = i;
+        }
+    }   
+    printf("Predicted word: %s\n", keys[max_ind]);
 
+    printf("Dictionary unpacked successfully:\n");
+    for (int i = 0; i < dict_size; i++) {
+        free(keys[i]);  
+    }
+    free(keys);
+    free(values);
+    free(buffer);
     return 0;
 }

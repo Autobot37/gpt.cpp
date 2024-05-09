@@ -6,6 +6,7 @@ TARGET = gpt2
 SRCS = gpt2.c
 OBJS = $(SRCS:.c=.o)
 
+.SILENT:
 .PHONY: all clean run
 
 all: $(TARGET)
@@ -18,3 +19,7 @@ $(TARGET): $(OBJS)
 
 run: $(TARGET)
 	./$(TARGET)
+	rm -f $(OBJS) $(TARGET)
+
+clean:
+	rm -f $(OBJS) $(TARGET)
