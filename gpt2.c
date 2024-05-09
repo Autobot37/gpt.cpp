@@ -209,7 +209,73 @@ void gpt_build(GPT* model, const char* path){
     fclose(model_file);
 }
 
+void gpt_forward(GPT* model, int* inputs, int B){
+
+    int T = model->config.block_size;
+    int V = model->config.vocab_size;
+    int NH = model->config.n_head;
+    int C = model->config.n_embd;
+    int L = model->config.n_layer;
+    int head_size = C / NH;      
+
+    Weights weights = model->weights;
+    activations act = model->act;
+
+    float* residual = NULL;
+    encoder_forward(act.encoded, inputs, weights.wte, weights.wpe, B, T, C);
+    for(int l=0; l<L; l++){
+
+        residual = (l==0) ? act.encoded : act.residual3 + (l-1) * B * T * C;
+        //weights for layer l
+        float* ln_l1_w = weights.ln_1_w + l * C;
+        float* ln_l1_b = weights.ln_1_b + l * C;
+        float* c_attn_w = weights.c_attn_w + l * 3 * C * C;
+        float* c_attn_b = weights.c_attn_b + l * 3 * C;
+        float* c_proj_w = weights.c_proj_w + l * C * C;
+        float* c_proj_b = weights.c_proj_b + l * C;
+        float* ln_l2_w = weights.ln_2_w + l * C;
+        float* ln_l2_b = weights.ln_2_b + l * C;
+        float* c_fc_w = weights.mlp_c_fc_w + l * 4 * C * C;
+        float* c_fc_b = weights.mlp_c_fc_b + l * 4 * C;
+        float* mlp_proj_w = weights.mlp_c_proj_w + l * 4 * C * C;
+        float* mlp_proj_b = weights.mlp_c_proj_b + l * C;
+        //activations for layer l
+        float* ln_l1_out = act.ln_1 + l * B * T * C;
+        float* ln_l1_mean = act.ln_1_mean + l * B * T;
+        float* ln_l1_rstd = act.ln_1_rstd + l * B * T;
+        float* qkv = act.qkv + l * B * T * 3 * C;
+        float* preatt = act.preatt + l * B * NH * T * T;
+        float * att = act.att + l * B * NH * T * T;
+        float* atty = act.atty + l * B * T * C;
+        float* attproj = act.attproj + l * B * T * C;
+        float* residual2 = act.residual2 + l* B * T * C;
+        float* ln_l2_out = act.ln_2 + l * B * T * C;
+        float* ln_l2_mean = act.ln_2_mean + l * B * T;
+        float* ln_l2_rstd = act.ln_2_rstd + l * B * T;
+        float* c_fc = act.c_fc + l * B * T * 4 * C;
+        float* fc_gelu = act.fc_gelu + l * B * T * 4 * C;
+        float* c_proj = act.c_proj + l * B * T * C;
+        float* residual3 = act.residual3 + l * B * T * C;
+
+        layernorm_forward(ln_l1_out, ln_l1_mean, ln_l1_rstd, act.encoded, ln_l1_w, ln_l1_b, B, T, C);
+        matmul_forward(qkv, ln_l1_out, c_attn_w, c_attn_b, B, T, C, C);
+        attention_forward(atty, preatt, att, qkv, B, T, C, NH);
+        matmul_forward(attproj, atty, c_proj_w, c_proj_b, B, T, C, C);
+        residual_forward(residual2, residual, attproj, B*T*C);
+        layernorm_forward(ln_l2_out, ln_l2_mean, ln_l2_rstd, residual2, ln_l2_w, ln_l2_b, B, T, C);
+        matmul_forward(c_fc, ln_l2_out, c_fc_w, c_fc_b, B, T, C, 4*C);
+        gelu_forward(fc_gelu, c_fc, B*T*4*C);
+        matmul_forward(c_proj, fc_gelu, mlp_proj_w, mlp_proj_b, B, T, 4*C, C);
+        residual_forward(residual3, residual2, c_proj, B*T*C);
+    }
+    residual = act.residual3 + (L-1) * B * T * C;
+    layernorm_forward(act.ln_f, act.ln_f_mean, act.ln_f_rstd, residual, weights.ln_f_w, weights.ln_f_b, B, T, C);
+    matmul_forward(act.logits, act.ln_f, weights.wte, NULL, B, T, C, V);
+    softmax_forward(act.probs, act.logits, B, T, V);
+}
+
 int main(){
+    srand(time(NULL));
 
     FILE *file = fopen("dictionary.bin", "rb");
     if (file == NULL) {
@@ -265,7 +331,7 @@ int main(){
         keys[i] = key;
         values[i] = val;
     }
-
+    printf("Dictionary unpacked successfully:\n");
 
     GPT model;
     
@@ -275,86 +341,37 @@ int main(){
     int NH = model.config.n_head;
     int C = model.config.n_embd;
     int L = model.config.n_layer;
-    int B = 2;
+    int B = 1;
     fill_act_sizes(model.act_sizes, model.config, B);
     alloc_activations(&model.act, model.act_sizes);
     
-    int head_size = C / NH;      
-
-    int* input = (int*)calloc(B * T , sizeof(int));
+    int* inputs = (int*)calloc(B * T , sizeof(int));
     for(int i = 0;i<B*T;i++){
-        input[i] = rand() % V;
+        inputs[i] = rand() % V;
     }
 
-    Weights weights = model.weights;
-    activations act = model.act;
-
-    float* residual = NULL;
-    encoder_forward(act.encoded, input, weights.wte, weights.wpe, B, T, C);
-    for(int l=0; l<L; l++){
-
-        residual = (l==0) ? act.encoded : act.residual3 + (l-1) * B * T * C;
-        //weights for layer l
-        float* ln_l1_w = weights.ln_1_w + l * C;
-        float* ln_l1_b = weights.ln_1_b + l * C;
-        float* c_attn_w = weights.c_attn_w + l * 3 * C * C;
-        float* c_attn_b = weights.c_attn_b + l * 3 * C;
-        float* c_proj_w = weights.c_proj_w + l * C * C;
-        float* c_proj_b = weights.c_proj_b + l * C;
-        float* ln_l2_w = weights.ln_2_w + l * C;
-        float* ln_l2_b = weights.ln_2_b + l * C;
-        float* c_fc_w = weights.mlp_c_fc_w + l * 4 * C * C;
-        float* c_fc_b = weights.mlp_c_fc_b + l * 4 * C;
-        float* mlp_proj_w = weights.mlp_c_proj_w + l * 4 * C * C;
-        float* mlp_proj_b = weights.mlp_c_proj_b + l * C;
-        //activations for layer l
-        float* ln_l1_out = act.ln_1 + l * B * T * C;
-        float* ln_l1_mean = act.ln_1_mean + l * B * T;
-        float* ln_l1_rstd = act.ln_1_rstd + l * B * T;
-        float* qkv = act.qkv + l * B * T * 3 * C;
-        float* preatt = act.preatt + l * B * NH * T * T;
-        float * att = act.att + l * B * NH * T * T;
-        float* atty = act.atty + l * B * T * C;
-        float* attproj = act.attproj + l * B * T * C;
-        float* residual2 = act.residual2 + l* B * T * C;
-        float* ln_l2_out = act.ln_2 + l * B * T * C;
-        float* ln_l2_mean = act.ln_2_mean + l * B * T;
-        float* ln_l2_rstd = act.ln_2_rstd + l * B * T;
-        float* c_fc = act.c_fc + l * B * T * 4 * C;
-        float* fc_gelu = act.fc_gelu + l * B * T * 4 * C;
-        float* c_proj = act.c_proj + l * B * T * C;
-        float* residual3 = act.residual3 + l * B * T * C;
-
-        layernorm_forward(ln_l1_out, ln_l1_mean, ln_l1_rstd, act.encoded, ln_l1_w, ln_l1_b, B, T, C);
-        matmul_forward(qkv, ln_l1_out, c_attn_w, c_attn_b, B, T, C, C);
-        attention_forward(atty, preatt, att, qkv, B, T, C, NH);
-        matmul_forward(attproj, atty, c_proj_w, c_proj_b, B, T, C, C);
-        residual_forward(residual2, residual, attproj, B*T*C);
-        layernorm_forward(ln_l2_out, ln_l2_mean, ln_l2_rstd, residual2, ln_l2_w, ln_l2_b, B, T, C);
-        matmul_forward(c_fc, ln_l2_out, c_fc_w, c_fc_b, B, T, C, 4*C);
-        gelu_forward(fc_gelu, c_fc, B*T*4*C);
-        matmul_forward(c_proj, fc_gelu, mlp_proj_w, mlp_proj_b, B, T, 4*C, C);
-        residual_forward(residual3, residual2, c_proj, B*T*C);
-    }
-    residual = act.residual3 + (L-1) * B * T * C;
-    layernorm_forward(act.ln_f, act.ln_f_mean, act.ln_f_rstd, residual, weights.ln_f_w, weights.ln_f_b, B, T, C);
-    matmul_forward(act.logits, act.ln_f, weights.wte, NULL, B, T, C, V);
-    softmax_forward(act.probs, act.logits, B, T, V);
-    printf("wet pants\n");
-
-    //probs has a size B, T , V
-    float* probs = act.probs;
-    int max_ind = 0;
-    float max_val = 0.0f;
-    for(int i = 0;i<V;i++){
-        if(probs[i] > max_val){
-            max_val = probs[i];
-            max_ind = i;
+    int max_tokens = 100;
+    for(int i = 0;i<max_tokens;i++){
+        gpt_forward(&model, inputs, B);
+        for(int b = 0;b<B;b++){
+            int* binputs = inputs + b*T;
+            float* probs = model.act.probs + b * T * V + (T-1) * V;
+            int max_ind = 0;
+            float max_val = 1e-5f;
+            for(int i = 0;i<V;i++){
+                if(probs[i] > max_val){
+                    max_val = probs[i];
+                    max_ind = i;
+                }
+            }
+            max_ind = ((int)rand() + i*i + i) % 40000;   
+            printf("%s ", keys[max_ind]+2);
+            binputs = realloc(binputs, (T + 1) * sizeof(int));
+            binputs = binputs + 1;
         }
-    }   
-    printf("Predicted word: %s\n", keys[max_ind]);
-
-    printf("Dictionary unpacked successfully:\n");
+    }
+    printf("\n");
+    
     for (int i = 0; i < dict_size; i++) {
         free(keys[i]);  
     }
