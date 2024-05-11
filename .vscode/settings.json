@@ -3,5 +3,6 @@
         "math.h": "c",
         "time.h": "c",
         "stdio.h": "c"
-    }
+    },
+    "C_Cpp.errorSquiggles": "disabled"
 }

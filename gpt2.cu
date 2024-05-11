@@ -4,8 +4,8 @@
 #include <math.h>
 #include <string.h>
 #include <stdint.h>
-#include <omp.h>
-#include "kernels/kernels.h"
+#include <cuda_runtime.h>
+#include "kernels/cuda_kernels.h"
 
 typedef struct Config {
     int block_size;

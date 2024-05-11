@@ -2,7 +2,7 @@ import sys
 import pickle
 import struct
 import json
-data = json.load(open("vocab.json"))
+data = json.load(open("../vocab.json"))
 
 def write():
     with open('dictionary.bin', 'wb') as f:
