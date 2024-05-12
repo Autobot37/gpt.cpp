@@ -348,7 +348,7 @@ int main(){
     fill_act_sizes(model.act_sizes, model.config, B);
     alloc_activations(&model.act, model.act_sizes);
     
-    int max_tokens = 16;
+    int max_tokens = 32;
     int* inputs = (int*)calloc((T+max_tokens) , sizeof(int));
     for(int i = 0;i<T;i++){
         inputs[i] = 31373;
@@ -363,12 +363,13 @@ int main(){
         int max_ind = 0;
         float max_val = 1e-5f;
         for(int j = 0;j<V;j++){
-            if(probs[j] > max_val){
+            if(probs[j] >= max_val){
                 max_val = probs[j];
                 max_ind = j;
             }
         }
-        printf("%s ", keys[max_ind]);
+        //max_ind = ((int)rand() + i*i*i) % 50000;
+        printf("%s ", keys[max_ind]+2);
         fflush(stdout);
         inputs[T] = max_ind;
         inputs = inputs + 1;

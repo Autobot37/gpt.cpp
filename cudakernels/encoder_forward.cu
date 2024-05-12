@@ -46,16 +46,20 @@ void rand_init(float* arr, int size){
         arr[i] = (float)rand() / RAND_MAX;
     }
 }
+void print_mat(float* arr,int size){
+    for(int i = 0;i<size;i++){
+	printf("%f",arr[i]);
+    }
+    printf("\n");
+}
 
 int main(){
 
-    int mul = 8;
-    int C = 32*mul;
-    int NH = 4*mul;
-    int T = 128*mul;
-    int V = 4096*mul;
-    int L = 4*mul;
-    int B = 1*mul;
+    int mul = 4;
+    int C = 256*mul;
+    int T = 256*mul;
+    int V = 8192*mul;
+    int B = 8*mul;
     int* inp = (int*)mallocCheck(sizeof(int) * B * T);
     float* out = (float*)mallocCheck(sizeof(int) * B * T * C);
     float* wpe = (float*)mallocCheck(sizeof(int) * T * C);
@@ -100,6 +104,9 @@ int main(){
     check = (float*)mallocCheck(sizeof(float) * B * T * C);
     cudaMemcpy(check, d_out, B * T * C * sizeof(float), cudaMemcpyDeviceToHost);
     cudaDeviceSynchronize();
+	
+   // print_mat(check, B*T*C);
+   // print_mat(out, B*T*C);
 
     for(int i = 0;i<B*T*C;i++){
         if(abs(out[i] - check[i]) > 1e-3f){

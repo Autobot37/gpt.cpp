@@ -1,63 +1,38 @@
-NVCC = nvcc
-CC = gcc
-CFLAGS = -std=c99
-LDFLAGS = -lm -pg
-CFLAGS_COND = -march=native
+CPU_SRC ?= gpt2.c
+CUDA_SRC ?= gpt2.cu
 
-# Compilation flags for CPU
-CPU_FLAGS = -ffast-math -O3 -march=native -funroll-loops
+CFLAGS = -march=native -lm --ffast-math -O3 -funroll-loops
+NVCCFLAGS = -O3 --use_fast_math -Xcompiler -fopenmp
+LDFLAGS = -lcublas -lcublasLt -lm
 
-TARGET_CPU = gpt2_cpu
-TARGET_CUDA = gpt2_cuda
-PROFILE_TARGET_CPU = gpt2_profile_cpu
-PROFILE_TARGET_CUDA = gpt2_profile_cuda
+EXECUTABLE = executable
 
-SRCS_C = gpt2.c
-SRCS_CUDA = gpt2.cu
+.SILENT: run_cpu run_gpu profile_cpu profile_cuda clean
+.PHONY: run_cpu run_gpu profile_cpu profile_cuda clean
 
-OBJS_C = $(SRCS_C:.c=.o)
-OBJS_CUDA = $(SRCS_CUDA:.cu=.o)
+run_cpu: $(CPU_SRC)
+	$(CC) $(CFLAGS) $(CPU_SRC) -o $(EXECUTABLE)
+	OMP_NUM_THREADS=8 ./$(EXECUTABLE)
+	rm $(EXECUTABLE)
 
-.SILENT:
-.PHONY: all clean run_cpu run_cuda profile_cpu profile_cuda
+run_cuda: $(CUDA_SRC)
+	nvcc $(NVCCFLAGS) $(CUDA_SRC) -o $(EXECUTABLE) $(LDFLAGS)
+	OMP_NUM_THREADS=8 ./$(EXECUTABLE)
+	rm $(EXECUTABLE)
 
-all: $(TARGET_CPU) $(TARGET_CUDA)
+profile_cpu: $(CPU_SRC)
+	$(CC) $(CFLAGS) -pg $(CPU_SRC) -o $(EXECUTABLE)
+	OMP_NUM_THREADS=8 ./$(EXECUTABLE)
+	gprof $(EXECUTABLE) gmon.out
+	rm $(EXECUTABLE) gmon.out
 
-$(TARGET_CPU): $(OBJS_C)
-	$(CC) $(CFLAGS) $(OBJS_C) -o $@ $(LDFLAGS) $(CPU_FLAGS)
-
-$(TARGET_CUDA): $(OBJS_CUDA)
-	$(NVCC) $(OBJS_CUDA) -o $@ $(LDFLAGS) -lcublas -lcublasLt --use_fast_math -Xcompiler -fopenmp
-
-%.o: %.c
-	$(CC) $(CFLAGS) -c $< -o $@
-
-%.o: %.cu
-	$(NVCC) -c $< -o $@ --use_fast_math -Xcompiler -fopenmp
-
-run_cpu: $(TARGET_CPU)
-	OMP_NUM_THREADS=8 ./$(TARGET_CPU)
-	rm -f $(TARGET_CPU)
-
-run_cuda: $(TARGET_CUDA)
-	./$(TARGET_CUDA)
-	rm -f $(TARGET_CUDA)
-
-profile_cpu: $(PROFILE_TARGET_CPU)
-	OMP_NUM_THREADS=8 env CFLAGS="$(CPU_FLAGS)" ./$(PROFILE_TARGET_CPU)
-	gprof $(PROFILE_TARGET_CPU)
-	rm -f $(PROFILE_TARGET_CPU)
-
-profile_cuda: $(PROFILE_TARGET_CUDA)
-	./$(PROFILE_TARGET_CUDA)
-	gprof $(PROFILE_TARGET_CUDA)
-	rm -f $(PROFILE_TARGET_CUDA)
-
-$(PROFILE_TARGET_CPU): $(OBJS_C)
-	$(CC) $(CFLAGS) $(OBJS_C) -o $@ $(LDFLAGS) $(CPU_FLAGS)
-
-$(PROFILE_TARGET_CUDA): $(OBJS_CUDA)
-	$(NVCC) $(OBJS_CUDA) -o $@ $(LDFLAGS)
+profile_cuda: $(CUDA_SRC)
+	nvcc $(NVCCFLAGS) -pg $(CUDA_SRC) -o $(EXECUTABLE) $(LDFLAGS)
+	OMP_NUM_THREADS=8 ./$(EXECUTABLE)
+	gprof $(EXECUTABLE) gmon.out
+	rm $(EXECUTABLE) gmon.out
 
 clean:
-	rm -f $(OBJS_C) $(OBJS_CUDA) $(TARGET_CPU) $(TARGET_CUDA) $(PROFILE_TARGET_CPU) $(PROFILE_TARGET_CUDA)
+	@echo "Cleaning up..."
+	rm -f $(EXECUTABLE) gmon.out
+	rm -f gpt2.o
