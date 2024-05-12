@@ -56,6 +56,12 @@ void softmax_forward_gpu(float* out, float* inp, int B, int T, int V){
     dim3 blocks((B + threads.x-1)/threads.x, (T + threads.y-1)/threads.y);
     softmax_forward_kernel<<<blocks, threads>>>(out, inp, B, T, V);
 }
+
+void rand_init(float* arr, int size){
+    for(int i = 0;i<size;i++){
+        arr[i] = (float)rand() / RAND_MAX;
+    }
+}
 int main(){
 
     int mul = 4;
@@ -66,6 +72,7 @@ int main(){
 
     float* inp = (float*)malloc(B*T*V*sizeof(float));
     float* out = (float*)malloc(B*T*V*sizeof(float));
+    rand_init(inp, B*T*V);
     
     clock_t start, end;
     start = clock();
@@ -78,11 +85,26 @@ int main(){
     float* d_out;
     cudaMalloc(&d_inp, B*T*V*sizeof(float));
     cudaMalloc(&d_out, B*T*V*sizeof(float));
+
+    cudaMemcpy(d_inp, inp, B*T*V*sizeof(float), cudaMemcpyHostToDevice);
+    cudaDeviceSynchronize();
+
     start = clock();
     softmax_forward_gpu(d_out, d_inp, B, T, V);
     cudaDeviceSynchronize();
     end = clock();
     printf("Time taken by GPU: %f\n", (double)(end-start)/CLOCKS_PER_SEC);
+
+    float* check = (float*)malloc(B*T*V*sizeof(float));
+    cudaMemcpy(check, d_out, B*T*V*sizeof(float), cudaMemcpyDeviceToHost);
+    cudaDeviceSynchronize();
+    for(int i=0;i<B*T*V;i++){
+        if(fabs(out[i] - check[i]) > 1e-5){
+            printf("Incorrect output Try Again!\n");
+            return 1;
+        }
+    }
+    printf("Correct output Yay!\n");
     
     return 0;
 }

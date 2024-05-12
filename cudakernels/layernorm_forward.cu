@@ -72,6 +72,12 @@ void layernorm_forward_gpu(float* out, float* mean, float* std_dev, float* inp, 
     cudaDeviceSynchronize();
 }
 
+void rand_init(float* arr, int size){
+    for(int i = 0;i<size;i++){
+        arr[i] = (float)rand() / RAND_MAX;
+    }
+}
+
 int main(){
 
     int mul = 4;
@@ -85,6 +91,9 @@ int main(){
     float* std_dev = (float*)malloc(B*T*sizeof(float));
     float* weight = (float*)malloc(C*sizeof(float));
     float* bias = (float*)malloc(C*sizeof(float));
+    rand_init(inp, B*T*C);
+    rand_init(weight, C);
+    rand_init(bias, C);
 
     clock_t start, end;
     double time_used;
@@ -103,14 +112,28 @@ int main(){
     cudaMalloc(&d_weight, C*sizeof(float));
     cudaMalloc(&d_bias, C*sizeof(float));
 
+    cudaMemcpy(d_inp, inp, B*T*C*sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_weight, weight, C*sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_bias, bias, C*sizeof(float), cudaMemcpyHostToDevice);
+    cudaDeviceSynchronize();
+
     start = clock();
     layernorm_forward_gpu(d_out, d_mean, d_std_dev, d_inp, d_weight, d_bias, B, T, C);
     end = clock();
     time_used = ((double) (end - start)) / CLOCKS_PER_SEC;
     printf("GPU Time used: %f\n", time_used);
 
-
-
+    float* check;
+    check = (float*)malloc(B*T*C*sizeof(float));
+    cudaMemcpy(check, d_out, B*T*C*sizeof(float), cudaMemcpyDeviceToHost);
+    cudaDeviceSynchronize();
+    for(int i=0;i<B*T*C;i++){
+        if(abs(out[i] - check[i]) > 1e-3f){
+            printf("Incorrect Output Try Again!\n");
+            return 0;
+        }
+    }
+    printf("And its Correct too! Yay!\n");
 
     return 0;
 }

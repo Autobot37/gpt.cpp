@@ -41,6 +41,12 @@ void encoder_forward_gpu(float* out, int* inp, float* wte, float* wpe, int B, in
     
 }
 
+void rand_init(float* arr, int size){
+    for(int i = 0;i<size;i++){
+        arr[i] = (float)rand() / RAND_MAX;
+    }
+}
+
 int main(){
 
     int mul = 8;
@@ -54,6 +60,12 @@ int main(){
     float* out = (float*)mallocCheck(sizeof(int) * B * T * C);
     float* wpe = (float*)mallocCheck(sizeof(int) * T * C);
     float* wte = (float*)mallocCheck(sizeof(int) * V * C);
+    rand_init(wpe, T * C);
+    rand_init(wte, V * C);
+    for(int i = 0;i<B*T;i++){
+        inp[i] = rand() % V;
+    }
+
     clock_t start, end, end2;
     double time_used;
     start = clock();
@@ -73,12 +85,30 @@ int main(){
     cudaMalloc(&d_inp, B * T * sizeof(int));
     cudaMalloc(&d_wte, V * C * sizeof(float)); 
     cudaMalloc(&d_wpe, T * C * sizeof(float));
+    cudaMemcpy(d_inp, inp, B * T * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_wte, wte, V * C * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_wpe, wpe, T * C * sizeof(float), cudaMemcpyHostToDevice);
+    cudaDeviceSynchronize();
 
     encoder_forward_gpu(out, inp, wte, wpe, B,T,C);
 
     end2 = clock();
     time_used = ((double)(end2 - end)) / CLOCKS_PER_SEC;
     printf("Time Used GPU: %lf seconds\n", time_used);
+
+    float* check;
+    check = (float*)mallocCheck(sizeof(float) * B * T * C);
+    cudaMemcpy(check, d_out, B * T * C * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaDeviceSynchronize();
+
+    for(int i = 0;i<B*T*C;i++){
+        if(abs(out[i] - check[i]) > 1e-3f){
+            printf("Incorrect output Try Again\n");
+            return 1;
+        }
+    }
+    printf("Correct output Yay!\n");
+            
     free(inp);
     free(out);
     free(wpe);

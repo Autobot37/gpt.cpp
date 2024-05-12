@@ -135,6 +135,13 @@ void attention_forward_gpu(float* out, float* preatt, float* att, float* qkv, in
     attention_forward_kernel<<<blocks, threads>>>(out, preatt, att, qkv, B, T, C, NH);
     cudaDeviceSynchronize();
 }
+
+void rand_init(float* arr, int size){
+    for(int i = 0;i<size;i++){
+        arr[i] = (float)rand() / RAND_MAX;
+    }
+}
+
 int main(){
 
     int mul = 4;
@@ -149,6 +156,9 @@ int main(){
     att = (float*)malloc(B*NH*T*T*sizeof(float));
     qkv = (float*)malloc(B*T*3*C*sizeof(float));
     out = (float*)malloc(B*T*C*sizeof(float));
+    rand_init(preatt, B*NH*T*T);
+    rand_init(att, B*NH*T*T);
+    rand_init(qkv, B*T*3*C);
 
     srand(time(NULL));
     clock_t start, end;
@@ -166,11 +176,28 @@ int main(){
     cudaMalloc(&d_qkv, B*T*3*C*sizeof(float));
     cudaMalloc(&d_out, B*T*C*sizeof(float));
 
+    cudaMemcpy(d_preatt, preatt, B*NH*T*T*sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_att, att, B*NH*T*T*sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_qkv, qkv, B*T*3*C*sizeof(float), cudaMemcpyHostToDevice);
+    cudaDeviceSynchronize();
+
     start = clock();
     attention_forward_gpu(d_out, d_preatt, d_att, d_qkv, B, T, C, NH);
     end = clock();
     time_used = ((double) (end - start)) / CLOCKS_PER_SEC;
     printf("Time: %f\n", time_used);
+
+    float* check_out;
+    check_out = (float*)malloc(B*T*C*sizeof(float));
+    cudaMemcpy(check_out, d_out, B*T*C*sizeof(float), cudaMemcpyDeviceToHost);
+    cudaDeviceSynchronize();
+    for(int i=0;i<B*T*C;i++){
+        if(abs(out[i] - check_out[i]) > 1e-3f){
+            printf("Incorrect output Try Again!\n");
+            return 0;
+        }
+    }
+    printf("Correct output Yay!\n");
 
     return 0;
 }
