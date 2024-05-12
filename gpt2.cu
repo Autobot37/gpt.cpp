@@ -68,7 +68,7 @@ float* alloc_weights(Weights* params, int* param_sizes){
     }
     printf("Weights will take %lu MB\n", num_params * sizeof(float) / (1024 * 1024));
     float* params_memory;
-    cudaCheck(cudaMalloc((void**)&params_memory, num_params * sizeof(float)));
+    cudaCheck(cudaMallocManaged((void**)&params_memory, num_params * sizeof(float)));
     float** ptrs[] = {
         &params->wte, &params->wpe, &params->ln_1_w, &params->ln_1_b,
         &params->c_attn_w, &params->c_attn_b, &params->c_proj_w, &params->c_proj_b,
@@ -119,18 +119,18 @@ void fill_act_sizes(int* act_sizes, Config config, int B){
     act_sizes[1] = L * B * T * C;
     act_sizes[2] = L * B * T;
     act_sizes[3] = L * B * T;
-    act_sizes[4] = L * B * T * 3 * C;
-    act_sizes[5] = L * B * NH * T * T;
-    act_sizes[6] = L * B * NH * T * T;
-    act_sizes[7] = L * B * T * C;
-    act_sizes[8] = L * B * T * C;
+    act_sizes[4] = B * T * 3 * C;
+    act_sizes[5] = B * NH * T * T;
+    act_sizes[6] = B * NH * T * T;
+    act_sizes[7] = B * T * C;
+    act_sizes[8] = B * T * C;
     act_sizes[9] = L * B * T * C;
     act_sizes[10] = L * B * T * C;
     act_sizes[11] = L * B * T;
     act_sizes[12] = L * B * T;
-    act_sizes[13] = L * B * T * 4 * C;
-    act_sizes[14] = L * B * T * 4 * C;
-    act_sizes[15] = L * B * T * C;
+    act_sizes[13] = B * T * 4 * C;
+    act_sizes[14] = B * T * 4 * C;
+    act_sizes[15] = B * T * C;
     act_sizes[16] = L * B * T * C;
     act_sizes[17] = B * T * C;
     act_sizes[18] = B * T;
@@ -146,7 +146,7 @@ float* alloc_activations(activations* act, int* act_sizes){
     }
     printf("Activations will take %lu MB\n", num_activations * sizeof(float) / (1024 * 1024));
     float* act_memory;
-    cudaCheck(cudaMalloc((void**)&act_memory, num_activations * sizeof(float)));
+    cudaCheck(cudaMallocManaged((void**)&act_memory, num_activations * sizeof(float)));
 
     float** ptrs[] = {
         &act->encoded, &act->ln_1, &act->ln_1_mean, &act->ln_1_rstd, &act->qkv,
@@ -237,12 +237,19 @@ void gpt_forward(GPT* model, int* inputs, int B){
     Weights weights = model->weights;
     activations act = model->act;
 
-    float* residual = NULL;
+    float* residual;
+    cudaMallocManaged((void**)&residual, B * T * C * sizeof(float));
     encoder_forward(act.encoded, inputs, weights.wte, weights.wpe, B, T, C);
 
     for(int l=0; l<L; l++){
 
-        residual = (l==0) ? act.encoded : act.residual3 + (l-1) * B * T * C;
+        // residual = (l==0) ? act.encoded : act.residual3 + (l-1) * B * T * C;
+        if(l==0){
+            cudaMemcpy(residual, act.encoded, B * T * C * sizeof(float), cudaMemcpyDeviceToDevice);
+        }
+        else{
+            cudaMemcpy(residual, act.residual3 + (l-1) * B * T * C, B * T * C * sizeof(float), cudaMemcpyDeviceToDevice);
+        }
         //weights for layer l
         float* ln_l1_w = weights.ln_1_w + l * C;
         float* ln_l1_b = weights.ln_1_b + l * C;
@@ -260,18 +267,18 @@ void gpt_forward(GPT* model, int* inputs, int B){
         float* ln_l1_out = act.ln_1 + l * B * T * C;
         float* ln_l1_mean = act.ln_1_mean + l * B * T;
         float* ln_l1_rstd = act.ln_1_rstd + l * B * T;
-        float* qkv = act.qkv + l * B * T * 3 * C;
-        float* preatt = act.preatt + l * B * NH * T * T;
-        float * att = act.att + l * B * NH * T * T;
-        float* atty = act.atty + l * B * T * C;
-        float* attproj = act.attproj + l * B * T * C;
+        float* qkv = act.qkv;
+        float* preatt = act.preatt;
+        float * att = act.att;
+        float* atty = act.atty;
+        float* attproj = act.attproj;
         float* residual2 = act.residual2 + l* B * T * C;
         float* ln_l2_out = act.ln_2 + l * B * T * C;
         float* ln_l2_mean = act.ln_2_mean + l * B * T;
         float* ln_l2_rstd = act.ln_2_rstd + l * B * T;
-        float* c_fc = act.c_fc + l * B * T * 4 * C;
-        float* fc_gelu = act.fc_gelu + l * B * T * 4 * C;
-        float* c_proj = act.c_proj + l * B * T * C;
+        float* c_fc = act.c_fc;
+        float* fc_gelu = act.fc_gelu;
+        float* c_proj = act.c_proj;
         float* residual3 = act.residual3 + l * B * T * C;
         layernorm_forward(ln_l1_out, ln_l1_mean, ln_l1_rstd, act.encoded, ln_l1_w, ln_l1_b, B, T, C);
         matmul_forward(qkv, ln_l1_out, c_attn_w, c_attn_b, B, T, C, C);
@@ -314,15 +321,18 @@ int main(){
     
     int max_tokens = 128;
 
-    printf("Inputs will take %lu MB\n", (T+max_tokens) * sizeof(int) / (1024 * 1024));
+    printf("Inputs will take %lu MB\n",(T+max_tokens) * sizeof(int) / (1024 * 1024));
     int* inputs;
-    cudaCheck(cudaMalloc((void**)&inputs, (T+max_tokens) * sizeof(int)));
+    cudaCheck(cudaMallocManaged((void**)&inputs, (T+max_tokens) * sizeof(int)));
+    int* cpuinputs = (int*)mallocCheck((T+max_tokens) * sizeof(int));
     for(int i = 0;i<T;i++){
-        inputs[i] = 1;
+        cpuinputs[i] = 1;
     }
+    cudaMemcpy(inputs, cpuinputs, (T+max_tokens) * sizeof(int), cudaMemcpyHostToDevice);
+    
 
     gpt_forward(&model, inputs, B);
-    // print_3d(model.act.encoded, B, T, V);
+    // // print_3d(model.act.encoded, B, T, V);
 
     clock_t start, end;
     start = clock();
