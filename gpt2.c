@@ -6,6 +6,7 @@
 #include <stdint.h>
 #include <omp.h>
 #include "kernels/kernels.h"
+#include "tokenizer.h"
 
 typedef struct Config {
     int block_size;
@@ -277,62 +278,10 @@ void gpt_forward(GPT* model, int* inputs, int B){
 int main(){
     srand(time(NULL));
 
-    FILE *file = fopen("dictionary.bin", "rb");
-    if (file == NULL) {
-        perror("Error opening file");
-        return 1;
-    }
-
-    // Read the entire file into memory
-    fseek(file, 0, SEEK_END);
-    long file_size = ftell(file);
-    fseek(file, 0, SEEK_SET);
-    uint8_t *buffer = (uint8_t *)malloc(file_size);
-    if (buffer == NULL) {
-        perror("Error allocating memory");
-        fclose(file);
-        return 1;
-    }
-    if (fread(buffer, 1, file_size, file) != file_size) {
-        perror("Error reading file");
-        free(buffer);
-        fclose(file);
-        return 1;
-    }
-    fclose(file);
-    int offset = 0;
-    int magic_num = *(int *)(buffer + offset);
-    offset += sizeof(int);
-    int dict_size = *(int *)(buffer + offset);
-    offset += sizeof(int);
-    printf("Magic number: %d\n", magic_num);
-    printf("Dictionary size: %d\n", dict_size);
-    char **keys = (char **)malloc(dict_size * sizeof(char *));
-    int *values = (int *)malloc(dict_size * sizeof(int));
-    if (keys == NULL || values == NULL) {
-        perror("Error allocating memory");
-        free(buffer);
-        return 1;
-    }
-    for (int i = 0; i < dict_size; i++) {
-        int key_size = *(int *)(buffer + offset);
-        offset += sizeof(int);
-        char *key = (char *)malloc((key_size + 1) * sizeof(char));
-        if (key == NULL) {
-            perror("Error allocating memory");
-            free(buffer);
-            return 1;
-        }
-        strncpy(key, (char *)(buffer + offset), key_size);
-        key[key_size] = '\0';  // Null-terminate the string
-        offset += key_size;
-        int val = *(int *)(buffer + offset);
-        offset += sizeof(int);
-        keys[i] = key;
-        values[i] = val;
-    }
-    printf("Dictionary unpacked successfully:\n");
-
+    Tokenizer tokenizer;
+    tokenizer_init(&tokenizer, "dictionary.bin");
+    int vocab_size = tokenizer.vocab_size;
+    
     GPT model;
     
     gpt_build(&model, "pythonscripts/params.bin");
@@ -365,7 +314,7 @@ int main(){
                 max_ind = j;
             }
         }
-        printf("%s ", keys[max_ind]);
+        printf("%s ", tokenizer_decode(&tokenizer, max_ind));
         fflush(stdout);
         inputs[T] = max_ind;
         inputs = inputs + 1;
@@ -377,11 +326,7 @@ int main(){
     float tok_per_sec = (float)max_tokens / cpu_time_used;
     printf("Tokens per second: %f\n", tok_per_sec);
 
-    for (int i = 0; i < dict_size; i++) {
-        free(keys[i]);  
-    }
-    free(keys);
-    free(values);
-    free(buffer);
+    tokenizer_free(&tokenizer);
+
     return 0;
 }

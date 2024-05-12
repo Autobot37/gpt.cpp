@@ -34,7 +34,7 @@ __global__ void encoder_forward_kernel(float* out, int* inp, float* wte, float* 
 }
 
 void encoder_forward_gpu(float* out, int* inp, float* wte, float* wpe, int B, int T, int C){
-    dim3 blockDim(32, 32); 
+    dim3 blockDim(16, 16); 
     dim3 gridDim((B + blockDim.x - 1) / blockDim.x, (T + blockDim.y - 1) / blockDim.y); // Adjust grid size
     encoder_forward_kernel<<<gridDim, blockDim>>>(out, inp, wte, wpe, B, T, C);
     cudaDeviceSynchronize();
@@ -61,16 +61,16 @@ int main(){
     int V = 8192*mul;
     int B = 8*mul;
     int* inp = (int*)mallocCheck(sizeof(int) * B * T);
-    float* out = (float*)mallocCheck(sizeof(int) * B * T * C);
-    float* wpe = (float*)mallocCheck(sizeof(int) * T * C);
-    float* wte = (float*)mallocCheck(sizeof(int) * V * C);
+    float* out = (float*)mallocCheck(sizeof(float) * B * T * C);
+    float* wpe = (float*)mallocCheck(sizeof(float) * T * C);
+    float* wte = (float*)mallocCheck(sizeof(float) * V * C);
     rand_init(wpe, T * C);
     rand_init(wte, V * C);
     for(int i = 0;i<B*T;i++){
         inp[i] = rand() % V;
     }
 
-    clock_t start, end, end2;
+    clock_t start, end;
     double time_used;
     start = clock();
 
@@ -94,10 +94,18 @@ int main(){
     cudaMemcpy(d_wpe, wpe, T * C * sizeof(float), cudaMemcpyHostToDevice);
     cudaDeviceSynchronize();
 
+    cudaEvent_t start_gpu, stop_gpu;
+    float gpu_time;
+    cudaEventCreate(&start_gpu);
+    cudaEventCreate(&stop_gpu);
+    cudaEventRecord(start_gpu, 0);
+
     encoder_forward_gpu(d_out, d_inp, d_wte, d_wpe, B,T,C);
-    
-    end2 = clock();
-    time_used = ((double)(end2 - end)) / CLOCKS_PER_SEC;
+    cudaDeviceSynchronize();
+    cudaEventRecord(stop_gpu, 0);
+    cudaEventSynchronize(stop_gpu);
+    cudaEventElapsedTime(&gpu_time, start_gpu, stop_gpu);
+    time_used = gpu_time / 1000.0;
     printf("Time Used GPU: %lf seconds\n", time_used);
 
     float* check;
@@ -109,7 +117,7 @@ int main(){
    // print_mat(out, B*T*C);
 
     for(int i = 0;i<B*T*C;i++){
-        if(abs(out[i] - check[i]) > 1e-3f){
+        if(abs(out[i] - check[i]) > 1e-5f){
             printf("Incorrect output Try Again\n");
             return 1;
         }

@@ -6,6 +6,7 @@
 #include <stdint.h>
 #include <cuda_runtime.h>
 #include "cudakernels/cuda_kernels.h"
+#include "tokenizer.h"
 
 typedef struct Config {
     int block_size;
@@ -65,17 +66,19 @@ float* alloc_weights(Weights* params, int* param_sizes){
     for(int i = 0;i<NUM_TENSORS;i++){
         num_params += param_sizes[i];
     }
-    float* params_memory = (float*)calloc(num_params , sizeof(float));
+    printf("Weights will take %lu MB\n", num_params * sizeof(float) / (1024 * 1024));
+    float* params_memory;
+    cudaCheck(cudaMalloc((void**)&params_memory, num_params * sizeof(float)));
     float** ptrs[] = {
         &params->wte, &params->wpe, &params->ln_1_w, &params->ln_1_b,
         &params->c_attn_w, &params->c_attn_b, &params->c_proj_w, &params->c_proj_b,
         &params->ln_2_w, &params->ln_2_b, &params->mlp_c_fc_w, &params->mlp_c_fc_b,
         &params->mlp_c_proj_w, &params->mlp_c_proj_b, &params->ln_f_w, &params->ln_f_b
     };
-    float* iter = params_memory;
+    char* iter = (char*)params_memory;
     for(int i = 0;i<NUM_TENSORS;i++){
-        *ptrs[i] = iter;
-        iter += param_sizes[i];
+        *ptrs[i] = (float*)iter;
+        iter += param_sizes[i] * sizeof(float);
     }
     return params_memory;
 }
@@ -141,10 +144,10 @@ float* alloc_activations(activations* act, int* act_sizes){
     for(int i = 0;i<NUM_ACTIVATIONS;i++){
         num_activations += act_sizes[i];
     }
-    float* act_memory = (float*)calloc(num_activations , sizeof(float));
-    if(act_memory == NULL){
-        printf("Activation memory assign failed\n");
-    }
+    printf("Activations will take %lu MB\n", num_activations * sizeof(float) / (1024 * 1024));
+    float* act_memory;
+    cudaCheck(cudaMalloc((void**)&act_memory, num_activations * sizeof(float)));
+
     float** ptrs[] = {
         &act->encoded, &act->ln_1, &act->ln_1_mean, &act->ln_1_rstd, &act->qkv,
         &act->preatt, &act->att, &act->atty, &act->attproj,
@@ -153,10 +156,10 @@ float* alloc_activations(activations* act, int* act_sizes){
         &act->ln_f, &act->ln_f_mean, &act->ln_f_rstd, &act->logits,
         &act->probs
     };
-    float* iter = act_memory;
+    char* iter = (char*)act_memory;
     for(int i = 0;i<NUM_ACTIVATIONS;i++){
-        *ptrs[i] = iter;
-        iter += act_sizes[i];
+        *ptrs[i] = (float*)iter;
+        iter += act_sizes[i] * sizeof(float);
     }
 
     return act_memory;
@@ -168,18 +171,19 @@ typedef struct Transformer {
     Config config;
     int params_sizes[NUM_TENSORS];
     int act_sizes[NUM_ACTIVATIONS];
-    float* params_memory;
+    float* params_memory;   
+    int num_params;
 }GPT;
 
 
 void gpt_build(GPT* model, const char* path){
-    FILE* model_file = fopen(path, "rb");
+    FILE* model_file = fopenCheck(path, "rb");
     if(model_file == NULL){
         printf("Model file not found\n");
         exit(1);
     }   
     int model_header[8];
-    fread(model_header, sizeof(int), 8, model_file);
+    freadCheck(model_header, sizeof(int), 8, model_file);
     if(model_header[0] != 3737){
         printf("Model file not compatible\n");
         exit(1);
@@ -204,12 +208,24 @@ void gpt_build(GPT* model, const char* path){
     for(int i = 0;i<NUM_TENSORS;i++){
         num_params += model->params_sizes[i];
     }
+    printf("Number of parameters: %d\n", num_params);
+    model->num_params = num_params;
+
     model->params_memory = alloc_weights(&model->weights, model->params_sizes);
-    fread(model->params_memory, sizeof(float), num_params, model_file);
-    fclose(model_file);
+    float* params_memory_cpu = (float*)mallocCheck(model->num_params * sizeof(float));
+    freadCheck(params_memory_cpu, 1, model->num_params * sizeof(float), model_file);
+    cudaCheck(cudaMemcpy(model->params_memory, params_memory_cpu, model->num_params * sizeof(float), cudaMemcpyHostToDevice));
+    free(params_memory_cpu);
+    fcloseCheck(model_file);
+
 }
 
 void gpt_forward(GPT* model, int* inputs, int B){
+
+    if(model->params_memory==NULL){
+        printf("Model weights not loaded\n");
+        exit(1);
+    }
 
     int T = model->config.block_size;
     int V = model->config.vocab_size;
@@ -223,6 +239,7 @@ void gpt_forward(GPT* model, int* inputs, int B){
 
     float* residual = NULL;
     encoder_forward(act.encoded, inputs, weights.wte, weights.wpe, B, T, C);
+
     for(int l=0; l<L; l++){
 
         residual = (l==0) ? act.encoded : act.residual3 + (l-1) * B * T * C;
@@ -256,7 +273,6 @@ void gpt_forward(GPT* model, int* inputs, int B){
         float* fc_gelu = act.fc_gelu + l * B * T * 4 * C;
         float* c_proj = act.c_proj + l * B * T * C;
         float* residual3 = act.residual3 + l * B * T * C;
-
         layernorm_forward(ln_l1_out, ln_l1_mean, ln_l1_rstd, act.encoded, ln_l1_w, ln_l1_b, B, T, C);
         matmul_forward(qkv, ln_l1_out, c_attn_w, c_attn_b, B, T, C, C);
         attention_forward(atty, preatt, att, qkv, B, T, C, NH);
@@ -280,62 +296,10 @@ int main(){
     printf("Using Device: %s\n", deviceprop.name);
     srand(time(NULL));
 
-    FILE *file = fopen("dictionary.bin", "rb");
-    if (file == NULL) {
-        perror("Error opening file");
-        return 1;
-    }
-
-    // Read the entire file into memory
-    fseek(file, 0, SEEK_END);
-    long file_size = ftell(file);
-    fseek(file, 0, SEEK_SET);
-    uint8_t *buffer = (uint8_t *)malloc(file_size);
-    if (buffer == NULL) {
-        perror("Error allocating memory");
-        fclose(file);
-        return 1;
-    }
-    if (fread(buffer, 1, file_size, file) != file_size) {
-        perror("Error reading file");
-        free(buffer);
-        fclose(file);
-        return 1;
-    }
-    fclose(file);
-    int offset = 0;
-    int magic_num = *(int *)(buffer + offset);
-    offset += sizeof(int);
-    int dict_size = *(int *)(buffer + offset);
-    offset += sizeof(int);
-    printf("Magic number: %d\n", magic_num);
-    printf("Dictionary size: %d\n", dict_size);
-    char **keys = (char **)malloc(dict_size * sizeof(char *));
-    int *values = (int *)malloc(dict_size * sizeof(int));
-    if (keys == NULL || values == NULL) {
-        perror("Error allocating memory");
-        free(buffer);
-        return 1;
-    }
-    for (int i = 0; i < dict_size; i++) {
-        int key_size = *(int *)(buffer + offset);
-        offset += sizeof(int);
-        char *key = (char *)malloc((key_size + 1) * sizeof(char));
-        if (key == NULL) {
-            perror("Error allocating memory");
-            free(buffer);
-            return 1;
-        }
-        strncpy(key, (char *)(buffer + offset), key_size);
-        key[key_size] = '\0';  // Null-terminate the string
-        offset += key_size;
-        int val = *(int *)(buffer + offset);
-        offset += sizeof(int);
-        keys[i] = key;
-        values[i] = val;
-    }
-    printf("Dictionary unpacked successfully:\n");
-
+    Tokenizer tokenizer;
+    tokenizer_init(&tokenizer, "dictionary.bin");
+    int vocab_size = tokenizer.vocab_size;
+    
     GPT model;
     
     gpt_build(&model, "pythonscripts/params.bin");
@@ -348,11 +312,17 @@ int main(){
     fill_act_sizes(model.act_sizes, model.config, B);
     alloc_activations(&model.act, model.act_sizes);
     
-    int max_tokens = 32;
-    int* inputs = (int*)calloc((T+max_tokens) , sizeof(int));
+    int max_tokens = 128;
+
+    printf("Inputs will take %lu MB\n", (T+max_tokens) * sizeof(int) / (1024 * 1024));
+    int* inputs;
+    cudaCheck(cudaMalloc((void**)&inputs, (T+max_tokens) * sizeof(int)));
     for(int i = 0;i<T;i++){
-        inputs[i] = 31373;
+        inputs[i] = 1;
     }
+
+    gpt_forward(&model, inputs, B);
+    // print_3d(model.act.encoded, B, T, V);
 
     clock_t start, end;
     start = clock();
@@ -363,13 +333,13 @@ int main(){
         int max_ind = 0;
         float max_val = 1e-5f;
         for(int j = 0;j<V;j++){
-            if(probs[j] >= max_val){
+            if(probs[j] > max_val){
                 max_val = probs[j];
                 max_ind = j;
             }
         }
-        //max_ind = ((int)rand() + i*i*i) % 50000;
-        printf("%s ", keys[max_ind]+2);
+        // max_ind = (int)rand() % V;
+        printf("%s ", tokenizer_decode(&tokenizer, max_ind));
         fflush(stdout);
         inputs[T] = max_ind;
         inputs = inputs + 1;
@@ -381,11 +351,6 @@ int main(){
     float tok_per_sec = (float)max_tokens / cpu_time_used;
     printf("Tokens per second: %f\n", tok_per_sec);
 
-    for (int i = 0; i < dict_size; i++) {
-        free(keys[i]);  
-    }
-    free(keys);
-    free(values);
-    free(buffer);
+    tokenizer_free(&tokenizer);
     return 0;
 }
