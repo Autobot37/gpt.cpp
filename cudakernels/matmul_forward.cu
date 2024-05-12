@@ -4,8 +4,6 @@
 #include <cuda_runtime.h>
 #include <omp.h>
 
-#define TILESIZE 8
-
 __global__ void matmul_gpu_kernel(float* out, float* inp, float* weight, float* bias, int B, int T, int C, int OC){
     int tx = threadIdx.x;
     int ty = threadIdx.y;
@@ -17,15 +15,14 @@ __global__ void matmul_gpu_kernel(float* out, float* inp, float* weight, float* 
 
     if(bt<B*T && oc<OC){
         float* inp_p = inp + bt * C;
-        float* out_p = out + bt * OC;
         float* weight_p = weight + oc * C;
+
         float val = (bias != NULL) ? bias[oc] : 0.0f;
         for(int i = 0;i<C;i++){
             val += inp_p[i] * weight_p[i];
         }
-        out_p[oc] = val;
+        out[bt * OC + oc] = val;
     }
-    
 }
 void matmul_forward_gpu(float* out, float* inp, float* weight, float* bias, int B, int T, int C, int OC){
     dim3 block_size(32, 32);
@@ -41,14 +38,14 @@ void matmul_forward(float* out, float* inp, float* weight, float* bias, int B, i
         for(int t = 0;t<T;t++){
             float* inp_p = inp + b * T * C + t * C;
             float* out_p = out + b * T * OC + t * OC;
-            for(int t2=0;t2<OC;t2++){
-                float* weight_p = weight + t2* C;
-                float val = (bias != NULL) ? bias[t2] : 0.0f;
+            for(int o=0;o<OC;o++){
+                float* weight_p = weight + o * C;
+                float val = (bias != NULL) ? bias[o] : 0.0f;
                 #pragma omp simd reduction(+:val) 
                 for(int i = 0;i<C;i++){
                     val += inp_p[i] * weight_p[i];
                 }
-                out_p[t2] = val;
+                out_p[o] = val;
             }
         }
     }
@@ -59,14 +56,25 @@ void rand_init(float* arr, int size){
         arr[i] = (float)rand() / RAND_MAX;
     }
 }
+void print_3d(float* arr, int B, int T, int C){
+    for(int b = 0;b<B;b++){
+        for(int t = 0;t<T;t++){
+            for(int c = 0;c<C;c++){
+                printf("%f ", arr[b*T*C + t*C + c]);
+            }
+            printf("\n");
+        }
+        printf("\n");
+    }
+}
 
 int main(){
 
-    int mul = 8;
-    int B = 4*mul;
-    int T = 128*mul;
-    int C = 128*mul;
-    int OC = 128*2*mul;
+    int mul = 1;
+    int B = 1*mul;
+    int T = 4*mul;
+    int C = 4*mul;
+    int OC = 4*mul;
 
     float *inp, *weight, *bias, *out;
     float *d_inp, *d_weight, *d_bias, *d_out;
@@ -77,16 +85,38 @@ int main(){
     rand_init(inp, B*T*C);
     rand_init(weight, OC*C);
     rand_init(bias, OC);
-
+    float* check;
+    check = (float*)malloc(B*T*OC*sizeof(float));
 
     cudaMalloc(&d_inp, B*T*C*sizeof(float));
     cudaMalloc(&d_weight, OC*C*sizeof(float));
     cudaMalloc(&d_bias, OC*sizeof(float));
     cudaMalloc(&d_out, B*T*OC*sizeof(float));
 
+    cudaMemset(d_inp, 0, B*T*C*sizeof(float));
+    cudaMemset(d_weight, 0, OC*C*sizeof(float));
+    cudaMemset(d_bias, 0, OC*sizeof(float));
+    cudaMemset(d_out, 0, B*T*OC*sizeof(float));
+
     cudaMemcpy(d_inp, inp, B*T*C*sizeof(float), cudaMemcpyHostToDevice);
     cudaMemcpy(d_weight, weight, OC*C*sizeof(float), cudaMemcpyHostToDevice);
     cudaMemcpy(d_bias, bias, OC*sizeof(float), cudaMemcpyHostToDevice);
+    cudaDeviceSynchronize();
+
+    float* check_input;
+    check_input = (float*)malloc(B*T*C*sizeof(float));
+    cudaMemcpy(check_input, d_inp, B*T*C*sizeof(float), cudaMemcpyDeviceToHost);
+    cudaDeviceSynchronize();
+
+    print_3d(inp, B, T, C);
+    print_3d(check_input, B, T, C);
+
+    for(int i = 0;i<B*T*C;i++){
+        if(abs(inp[i] - check_input[i]) > 1e-3f){
+            printf("Incorrect even input man Try again!\n");
+            return 0;
+        }
+    }
 
     clock_t start, mid, end;
     double cpu_time_used, gpu_time_used;
@@ -100,8 +130,6 @@ int main(){
     end = clock();
     gpu_time_used = ((double) (end - mid)) / CLOCKS_PER_SEC;
 
-    float* check;
-    check = (float*)malloc(B*T*OC*sizeof(float));
     cudaMemcpy(check, d_out, B*T*OC*sizeof(float), cudaMemcpyDeviceToHost);
 
     printf("CPU time used: %f\n", cpu_time_used);
@@ -109,13 +137,17 @@ int main(){
     int faster = (int)(cpu_time_used / gpu_time_used);
     printf("GPU is %d times faster than CPU\n", faster);
 
-    // for(int i = 0;i<B*T*OC;i++){
-    //     if(abs(out[i] - check[i] > 1e-5)){
-    //         printf("Incorrect output try again!\n");
-    //         return 1;
-    //     }
-    // }
-    // printf("And Correct too!\n");
+    print_3d(out, B, T, OC);
+    print_3d(check, B, T, OC);
+
+    for(int i = 0;i<B*T*OC;i++){
+        if(abs(out[i] - check[i] > 1e-3f)){
+            printf("Incorrect output Try again!\n");
+            return 0;
+        }
+    }
+
+    printf("And Correct too!\n");
 
     free(inp);
     free(weight);
