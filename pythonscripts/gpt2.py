@@ -9,10 +9,10 @@ import torch.nn.functional as F
 
 @dataclass
 class Config:
-    n_embd:int = 32
-    n_head:int = 4
-    block_size:int = 128
-    vocab_size:int = 4096
+    n_embd:int = 128
+    n_head:int = 8
+    block_size:int = 256
+    vocab_size:int = 8192*4
     n_layer:int = 4
 
 @dataclass
