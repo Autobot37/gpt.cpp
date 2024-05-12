@@ -62,7 +62,7 @@ void rand_init(float* arr, int size){
 
 int main(){
 
-    int mul = 4;
+    int mul = 8;
     int B = 4*mul;
     int T = 128*mul;
     int C = 128*mul;

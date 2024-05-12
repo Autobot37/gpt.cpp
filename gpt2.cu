@@ -5,7 +5,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <cuda_runtime.h>
-#include "kernels/cuda_kernels.h"
+#include "cudakernels/cuda_kernels.h"
 
 typedef struct Config {
     int block_size;
@@ -275,6 +275,9 @@ void gpt_forward(GPT* model, int* inputs, int B){
 }
 
 int main(){
+    cudaDeviceProp deviceprop;
+    cudaGetDeviceProperties(&deviceprop, 0);
+    printf("Using Device: %s\n", deviceprop.name);
     srand(time(NULL));
 
     FILE *file = fopen("dictionary.bin", "rb");
@@ -335,7 +338,7 @@ int main(){
 
     GPT model;
     
-    gpt_build(&model, "params.bin");
+    gpt_build(&model, "pythonscripts/params.bin");
     int T = model.config.block_size;
     int V = model.config.vocab_size;
     int NH = model.config.n_head;
@@ -345,41 +348,37 @@ int main(){
     fill_act_sizes(model.act_sizes, model.config, B);
     alloc_activations(&model.act, model.act_sizes);
     
-    int* inputs = (int*)calloc(B * T , sizeof(int));
-    for(int i = 0;i<B*T;i++){
-        inputs[i] = rand() % V;
+    int max_tokens = 16;
+    int* inputs = (int*)calloc((T+max_tokens) , sizeof(int));
+    for(int i = 0;i<T;i++){
+        inputs[i] = 31373;
     }
 
     clock_t start, end;
     start = clock();
 
-    int max_tokens = 4;
     for(int i = 0;i<max_tokens;i++){
         gpt_forward(&model, inputs, B);
-        for(int b = 0;b<B;b++){
-            int* binputs = inputs + b*T;
-            float* probs = model.act.probs + b * T * V + (T-1) * V;
-            int max_ind = 0;
-            float max_val = 1e-5f;
-            for(int j = 0;j<V;j++){
-                if(probs[j] > max_val){
-                    max_val = probs[j];
-                    max_ind = j;
-                }
+        float* probs = model.act.probs + (T-1) * V;
+        int max_ind = 0;
+        float max_val = 1e-5f;
+        for(int j = 0;j<V;j++){
+            if(probs[j] > max_val){
+                max_val = probs[j];
+                max_ind = j;
             }
-            max_ind = ((int)rand() + i*i + i) % 40000;   
-            printf("%s ", keys[max_ind]+2);
-            fflush(stdout);
-            binputs = (int*)realloc(binputs, (T + 1) * sizeof(int));
-            binputs = binputs + 1;
         }
+        printf("%s ", keys[max_ind]);
+        fflush(stdout);
+        inputs[T] = max_ind;
+        inputs = inputs + 1;
     }
     printf("\n");
     end = clock();
     double cpu_time_used = ((double) (end - start)) / CLOCKS_PER_SEC;
-    printf("CPU time used: %f seconds\n", cpu_time_used);
-    int tok_per_sec = max_tokens / cpu_time_used;
-    printf("Tokens per second: %d\n", tok_per_sec);
+    printf("GPU time used: %f seconds\n", cpu_time_used);
+    float tok_per_sec = (float)max_tokens / cpu_time_used;
+    printf("Tokens per second: %f\n", tok_per_sec);
 
     for (int i = 0; i < dict_size; i++) {
         free(keys[i]);  
