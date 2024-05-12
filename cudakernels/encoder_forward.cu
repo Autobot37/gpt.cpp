@@ -90,8 +90,8 @@ int main(){
     cudaMemcpy(d_wpe, wpe, T * C * sizeof(float), cudaMemcpyHostToDevice);
     cudaDeviceSynchronize();
 
-    encoder_forward_gpu(out, inp, wte, wpe, B,T,C);
-
+    encoder_forward_gpu(d_out, d_inp, d_wte, d_wpe, B,T,C);
+    
     end2 = clock();
     time_used = ((double)(end2 - end)) / CLOCKS_PER_SEC;
     printf("Time Used GPU: %lf seconds\n", time_used);
