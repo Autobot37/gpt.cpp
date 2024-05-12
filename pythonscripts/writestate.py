@@ -57,7 +57,7 @@ def write_model(model, filename):
 def write_state(model, x, y, logits, loss, filename):
     pass
 
-gpt = GPT(GPTConfig)
+gpt = GPT.from_pretrained("gpt2")
 params_path = "params.bin"
 write_model(gpt, params_path)
 

@@ -335,7 +335,7 @@ int main(){
 
     GPT model;
     
-    gpt_build(&model, "params.bin");
+    gpt_build(&model, "pythonscripts/params.bin");
     int T = model.config.block_size;
     int V = model.config.vocab_size;
     int NH = model.config.n_head;
@@ -353,7 +353,7 @@ int main(){
     clock_t start, end;
     start = clock();
 
-    int max_tokens = 100;
+    int max_tokens = 4;
     for(int i = 0;i<max_tokens;i++){
         gpt_forward(&model, inputs, B);
         for(int b = 0;b<B;b++){
@@ -367,7 +367,6 @@ int main(){
                     max_ind = j;
                 }
             }
-            max_ind = ((int)rand() + i*i + i) % 40000;   
             printf("%s ", keys[max_ind]+2);
             fflush(stdout);
             binputs = (int*)realloc(binputs, (T + 1) * sizeof(int));

@@ -117,7 +117,7 @@ class GPT(nn.Module):
 
     @staticmethod
     def from_pretrained(model_type):
-        assert model_type in {'gpt2', 'gpt2-medium','gpt2-large','gpt2-xl'}
+        assert model_type in {"gpt2", 'gpt2-medium','gpt2-large','gpt2-xl'}
         from transformers import GPT2LMHeadModel
         config_args = {
             'gpt2':         dict(n_layer=12, n_head=12, n_embd=768),  # 124M params

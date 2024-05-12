@@ -353,7 +353,7 @@ int main(){
     clock_t start, end;
     start = clock();
 
-    int max_tokens = 100;
+    int max_tokens = 4;
     for(int i = 0;i<max_tokens;i++){
         gpt_forward(&model, inputs, B);
         for(int b = 0;b<B;b++){
