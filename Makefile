@@ -19,7 +19,6 @@ run_cpu: $(CPU_SRC)
 run_cuda: $(CUDA_SRC)
 	nvcc $(NVCCFLAGS) $(CUDA_SRC) -o $(EXECUTABLE) $(CUDA_LDFLAGS)
 	OMP_NUM_THREADS=8 ./$(EXECUTABLE)
-	rm $(EXECUTABLE)
 
 profile_cpu: $(CPU_SRC)
 	$(CC) $(CFLAGS) -pg $(CPU_SRC) -o $(EXECUTABLE) $(LDFLAGS)

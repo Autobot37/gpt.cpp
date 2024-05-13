@@ -5,6 +5,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <cuda_runtime.h>
+#include <cublas_v2.h>
 #include "cudakernels/cuda_kernels.h"
 #include "tokenizer.h"
 
@@ -88,6 +89,7 @@ float* alloc_weights(Weights* params, int* param_sizes){
         *ptrs[i] = (float*)iter;
         iter += param_sizes[i] * sizeof(float);
     }
+    printf("Allocated weights\n");
     return params_memory;
 }
 
@@ -169,6 +171,7 @@ float* alloc_activations(activations* act, int* act_sizes){
         *ptrs[i] = (float*)iter;
         iter += act_sizes[i] * sizeof(float);
     }
+    printf("Allocated activations\n");
 
     return act_memory;
 }
@@ -282,19 +285,19 @@ void gpt_forward(GPT* model, int* inputs, int B){
         float* c_proj = act.c_proj;
         float* residual3 = act.residual3;
         layernorm_forward(ln_l1_out, ln_l1_mean, ln_l1_rstd, act.encoded, ln_l1_w, ln_l1_b, B, T, C);
-        matmul_forward(qkv, ln_l1_out, c_attn_w, c_attn_b, B, T, C, C);
+        matmul_forward2(qkv, ln_l1_out, c_attn_w, c_attn_b, B, T, C, C);
         attention_forward(atty, preatt, att, qkv, B, T, C, NH);
-        matmul_forward(attproj, atty, c_proj_w, c_proj_b, B, T, C, C);
+        matmul_forward2(attproj, atty, c_proj_w, c_proj_b, B, T, C, C);
         residual_forward(residual2, residual, attproj, B*T*C);
         layernorm_forward(ln_l2_out, ln_l2_mean, ln_l2_rstd, residual2, ln_l2_w, ln_l2_b, B, T, C);
-        matmul_forward(c_fc, ln_l2_out, c_fc_w, c_fc_b, B, T, C, 4*C);
+        matmul_forward2(c_fc, ln_l2_out, c_fc_w, c_fc_b, B, T, C, 4*C);
         gelu_forward(fc_gelu, act.c_fc, B*T*4*C);
-        matmul_forward(c_proj, fc_gelu, mlp_proj_w, mlp_proj_b, B, T, 4*C, C);
+        matmul_forward2(c_proj, fc_gelu, mlp_proj_w, mlp_proj_b, B, T, 4*C, C);
         residual_forward(residual3, residual2, c_proj, B*T*C);
     }
     residual = act.residual3 + (L-1) * B * T * C;
     layernorm_forward(act.ln_f, act.ln_f_mean, act.ln_f_rstd, residual, weights.ln_f_w, weights.ln_f_b, B, T, C);
-    matmul_forward(act.logits, act.ln_f, weights.wte, NULL, B, T, C, V);
+    matmul_forward2(act.logits, act.ln_f, weights.wte, NULL, B, T, C, V);
     softmax_forward(act.probs, act.logits, B, T, V);
 }
 
@@ -320,19 +323,19 @@ int main(){
     fill_act_sizes(model.act_sizes, model.config, B);
     alloc_activations(&model.act, model.act_sizes);
     
-    int max_tokens = 12;
+    int max_tokens = 2;
 
     printf("Inputs will take %lu MB\n",(T+max_tokens) * sizeof(int) / (1024 * 1024));
     int* inputs;
     cudaCheck(cudaMalloc((void**)&inputs, (T+max_tokens) * sizeof(int)));
     int* cpuinputs = (int*)mallocCheck((T+max_tokens) * sizeof(int));
     for(int i = 0;i<T;i++){
-        cpuinputs[i] = 1;
+        cpuinputs[i] = 34343;
     }
     cudaMemcpy(inputs, cpuinputs, (T+max_tokens) * sizeof(int), cudaMemcpyHostToDevice);
     
 
-    gpt_forward(&model, inputs, B);
+    // gpt_forward(&model, inputs, B);
     // // print_3d(model.act.encoded, B, T, V);
 
     clock_t start, end;
@@ -340,10 +343,12 @@ int main(){
 
     float* cpu_probs = (float*)mallocCheck(B * T * V * sizeof(float));
 
+    printf("Generated text: ");
+
     for(int i = 0;i<max_tokens;i++){
         gpt_forward(&model, inputs, B);
         cudaMemcpy(cpu_probs, model.act.probs, B * T * V * sizeof(float), cudaMemcpyDeviceToHost);
-        cudaDeviceSynchronize();
+     
         float* probs = cpu_probs + (T-1) * V;
         int max_ind = 0;
         float max_val = 1e-5f;

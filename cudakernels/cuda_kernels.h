@@ -22,7 +22,6 @@ void encoder_forward(float* out, int* inp, float* wte, float* wpe, int B, int T,
     dim3 blockDim(32, 32); 
     dim3 gridDim((B + blockDim.x - 1) / blockDim.x, (T + blockDim.y - 1) / blockDim.y); // Adjust grid size
     encoder_forward_kernel<<<gridDim, blockDim>>>(out, inp, wte, wpe, B, T, C);
-    cudaDeviceSynchronize();
     
 }
 void encoder_backward(float* d_wpe, float* d_wte, int* inp, float* d_out, int B, int T, int C){
@@ -74,7 +73,6 @@ void layernorm_forward(float* out, float* mean, float* std_dev, float* inp, floa
     dim3 threadsPerBlock(4, 256);
     dim3 numBlocks((B + threadsPerBlock.x - 1)/threadsPerBlock.x, (T + threadsPerBlock.y - 1)/threadsPerBlock.y);
     layernorm_forward_kernel<<<numBlocks, threadsPerBlock>>>(out, mean, std_dev, inp, weight, bias, B, T, C);
-    cudaDeviceSynchronize();
 }
 //------------------------------------------
 __global__ void matmul_gpu_kernel(float* out, float* inp, float* weight, float* bias, int B, int T, int C, int OC){
@@ -104,6 +102,33 @@ void matmul_forward(float* out, float* inp, float* weight, float* bias, int B, i
     grid_size.x = (B*T + block_size.x - 1) / block_size.x;
     grid_size.y = (OC + block_size.y - 1) / block_size.y;
     matmul_gpu_kernel<<<grid_size, block_size>>>(out, inp, weight, bias, B, T, C, OC);
+}
+
+//--------------------------------------------
+__global__ void add_bias(float* out, const float* bias, int B, int T, int OC) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < OC * B * T) {
+        int oc = idx / (B * T);
+        out[idx] += bias[oc];
+    }
+}
+
+void matmul_forward2(float* d_out,
+                     const float* d_inp, const float* d_weight, const float* d_bias,
+                     int B, int T, int C, int OC) {
+    int sqrt_block_size = 32;
+    cublasHandle_t cublas_handle;
+    cublasCreate(&cublas_handle);
+    const float alpha = 1.0f;
+    const float beta = 0.0f;
+    cublasSgemm(cublas_handle, CUBLAS_OP_T, CUBLAS_OP_N, OC, B * T, C,
+                             &alpha, d_weight, C, d_inp, C, &beta, d_out, OC);
+    if (d_bias != nullptr) {
+        int block_size = sqrt_block_size * sqrt_block_size;
+        int grid_size = (OC * B * T + block_size - 1) / block_size;
+        add_bias<<<grid_size, block_size>>>(d_out, d_bias, B, T, OC);
+    }
+    cublasDestroy(cublas_handle);
 }
 
 //-------------------------------------------
@@ -185,7 +210,6 @@ void attention_forward(float* out, float* preatt, float* att, float* qkv, int B,
     dim3 threads(32, 32);
     dim3 blocks((B+31)/32, (T+31)/32);
     attention_forward_kernel<<<blocks, threads>>>(out, preatt, att, qkv, B, T, C, NH);
-    cudaDeviceSynchronize();
 }
 
 //---------------------------------------------
