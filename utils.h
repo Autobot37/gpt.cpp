@@ -1,13 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-void cudaCheck(cudaError_t error, const char *file, int line) {
-  if (error != cudaSuccess) {
-    printf("[CUDA ERROR] at file %s:%d:\n%s\n", file, line, cudaGetErrorString(error));
-    exit(EXIT_FAILURE);
-  }
-};
-#define cudaCheck(err) (cudaCheck(err, __FILE__, __LINE__))
 //---------------------
 void *malloc_check(size_t size, const char *file, int line) {
     void *ptr = malloc(size);

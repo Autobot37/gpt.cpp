@@ -107,11 +107,17 @@ void matmul_forward(float* out, float* inp, float* weight, float* bias, int B, i
 }
 
 //-------------------------------------------
-
-void residual_forward(float* out, float* inp, float* skip, int dim){
-    for(int i = 0;i<dim;i++){
+__global__ void residual_forward_kernel(float* out, float* inp, float* skip, int dim){
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if(i<dim){
         out[i] = inp[i] + skip[i];
     }
+}
+
+void residual_forward(float* out, float* inp, float* skip, int dim){
+    dim3 threads(256);
+    dim3 blocks((dim + 255)/256);
+    residual_forward_kernel<<<blocks, threads>>>(out, inp, skip, dim);
 }
 //-------------------------------------------
 
@@ -183,11 +189,19 @@ void attention_forward(float* out, float* preatt, float* att, float* qkv, int B,
 }
 
 //---------------------------------------------
-void gelu_forward(float* out, float* inp, int dim){
-    for(int i = 0;i<dim;i++){
-        float val = inp[i];
-        out[i] = 0.5f * val * (1.0f + tanhf(0.7978845608f * (val + 0.044715f * val * val * val)));
+__global__ void gelu_forward_kernel(float* out, float* inp, int dim){
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if(i<dim){
+        float x = inp[i];
+        float cdf = 0.5f * (1.0f + tanhf((sqrtf(2.0f/M_PI) * (x + 0.044715f * x * x * x)) / (1.0f + 0.044715f * x * x)));
+        out[i] = x * cdf;
     }
+}
+
+void gelu_forward(float* out, float* inp, int dim){
+    dim3 threads(256);
+    dim3 blocks((dim + 255)/256);
+    gelu_forward_kernel<<<blocks, threads>>>(out, inp, dim);
 }
 
 //-------------------------------------------

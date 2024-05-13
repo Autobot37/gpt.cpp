@@ -224,6 +224,7 @@ void gpt_forward(GPT* model, int* inputs, int B){
 
     float* residual = NULL;
     encoder_forward(act.encoded, inputs, weights.wte, weights.wpe, B, T, C);
+    
     for(int l=0; l<L; l++){
 
         residual = (l==0) ? act.encoded : act.residual3 + (l-1) * B * T * C;
@@ -293,15 +294,16 @@ int main(){
     int B = 1;
     fill_act_sizes(model.act_sizes, model.config, B);
     alloc_activations(&model.act, model.act_sizes);
-    
     int max_tokens = 16;
-    int* inputs = (int*)calloc((T+max_tokens) , sizeof(int));
+    int* inputs = (int*)mallocCheck((T+max_tokens)  * sizeof(int));
     for(int i = 0;i<T;i++){
-        inputs[i] = 31373;
+        inputs[i] = 1;
     }
 
     clock_t start, end;
     start = clock();
+    gpt_forward(&model, inputs, B);
+
 
     for(int i = 0;i<max_tokens;i++){
         gpt_forward(&model, inputs, B);

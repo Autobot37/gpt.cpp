@@ -100,6 +100,6 @@ int main(){
     free(b);
     free(out);
     free(check);
-    
+
     return 0;
 }
