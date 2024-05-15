@@ -68,7 +68,7 @@ void attention_forward(float* out, float* preatt, float* att, float* qkv, int B,
     }
 } 
 //ok first parellizing across only B and T
-__global__ void preatt_kernel(float* preatt,float* maxvals, float* qkv, int B, int T, int C, int NH){
+__global__ void preatt_kernel(float* preatt,float* qkv, int B, int T, int C, int NH){
     int bt = blockIdx.x * blockDim.x + threadIdx.x;
     int h = blockIdx.y * blockDim.y + threadIdx.y;
     int t2 = blockIdx.z * blockDim.z + threadIdx.z;
@@ -82,7 +82,6 @@ __global__ void preatt_kernel(float* preatt,float* maxvals, float* qkv, int B, i
     float* query = qkv + b * T * 3 * C + t * 3 * C + h * hs;
     float* preatt_p = preatt + b*NH*T*T + h*T*T + t*T;
     float* key = qkv + b * T * 3 * C + t2 * 3 * C + h*hs + C;
-    float* maxval = maxvals + b*NH*T + t*T + h;
 
     if(t2>t){
         preatt_p[t2] = 0.0f;
@@ -93,99 +92,16 @@ __global__ void preatt_kernel(float* preatt,float* maxvals, float* qkv, int B, i
         val += query[i] * key[i];
     }
     val *= scale;
-    if(val>(*maxval)){
-        *maxval = val;
-    }
     preatt_p[t2] = val;
 }
 
-void preatt_gpu(float* preatt,float* maxval, float* qkv, int B, int T, int C, int NH){
+void preatt_gpu(float* preatt, float* qkv, int B, int T, int C, int NH){
     dim3 threads(8,8,8);
     dim3 blocks;
     blocks.x = (B*T+7)/8;
     blocks.y = (NH+7)/8;
     blocks.z = (T+7)/8;
-    preatt_kernel<<<blocks, threads>>>(preatt, maxval, qkv, B, T, C, NH);
-}
-
-
-#define SHMEM_SIZE 1024
-__device__ void warpReduce(volatile float* shmem_ptr, int t, int N) {
-    if (t < N) {
-        shmem_ptr[t] = fmaxf(shmem_ptr[t], shmem_ptr[t + 32]);
-        shmem_ptr[t] = fmaxf(shmem_ptr[t], shmem_ptr[t + 16]);
-        shmem_ptr[t] = fmaxf(shmem_ptr[t], shmem_ptr[t + 8]);
-        shmem_ptr[t] = fmaxf(shmem_ptr[t], shmem_ptr[t + 4]);
-        shmem_ptr[t] = fmaxf(shmem_ptr[t], shmem_ptr[t + 2]);
-        shmem_ptr[t] = fmaxf(shmem_ptr[t], shmem_ptr[t + 1]);
-    }
-}
-
-__device__ void max_reduction(float* result, float* arr, int N) {
-    __shared__ float partial_max[SHMEM_SIZE];
-    int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    int i = blockIdx.x * (blockDim.x * 2) + threadIdx.x;
-
-    if (tid < N) {
-        partial_max[threadIdx.x] = fmaxf(arr[i], arr[i + blockDim.x]);
-    }
-    __syncthreads();
-
-    for (int s = blockDim.x / 2; s > 32; s >>= 1) {
-        if (threadIdx.x < s) {
-            if (tid + s < N) {
-                partial_max[threadIdx.x] = fmaxf(partial_max[threadIdx.x], partial_max[threadIdx.x + s]);
-            }
-        }
-        __syncthreads();
-    }
-
-    if (threadIdx.x < 32) {
-        warpReduce(partial_max, threadIdx.x, N);
-    }
-
-    if (threadIdx.x == 0 && tid < N) {
-        result[blockIdx.x] = partial_max[0];
-    }
-}
-
-_device__ void warpReduceSum(volatile float* shmem_ptr, int t, int N) {
-    if (t < N) {
-        shmem_ptr[t] += (shmem_ptr[t + 32]);
-        shmem_ptr[t] += (shmem_ptr[t + 16]);
-        shmem_ptr[t] += (shmem_ptr[t + 8]);
-        shmem_ptr[t] += (shmem_ptr[t + 4]);
-        shmem_ptr[t] += (shmem_ptr[t + 2]);
-        shmem_ptr[t] += (shmem_ptr[t + 1]);
-    }
-}
-
-__device__ void sum_reduction(float* result, float* arr, int N) {
-    __shared__ float partial_max[SHMEM_SIZE];
-    int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    int i = blockIdx.x * (blockDim.x * 2) + threadIdx.x;
-
-    if (tid < N) {
-        partial_max[threadIdx.x] = (expf(arr[i]) + expf(arr[i + blockDim.x]));
-    }
-    __syncthreads();
-
-    for (int s = blockDim.x / 2; s > 32; s >>= 1) {
-        if (threadIdx.x < s) {
-            if (tid + s < N) {
-                partial_max[threadIdx.x] = (expf(partial_max[threadIdx.x]) + expf(partial_max[threadIdx.x + s]));
-            }
-        }
-        __syncthreads();
-    }
-
-    if (threadIdx.x < 32) {
-        warpReduceSum(partial_max, threadIdx.x, N);
-    }
-
-    if (threadIdx.x == 0 && tid < N) {
-        result[blockIdx.x] = partial_max[0];
-    }
+    preatt_kernel<<<blocks, threads>>>(preatt, qkv, B, T, C, NH);
 }
 
 __global__ void softmax_kernel(float* att, float* preatt, int B, int T, int C, int NH){
@@ -199,44 +115,83 @@ __global__ void softmax_kernel(float* att, float* preatt, int B, int T, int C, i
     }
     float* preatt_p = preatt + b*NH*T*T + h*T*T + t*T;
     float* att_p = att + b*NH*T*T + h*T*T + t*T;
-    //warpreduce for maxval from preatt_p
-    float maxval = 0;
-    int tb_size = 1024;
-    int grid_size = (T+tb_size-1)/tb_size/2;
-    float* maxvals;
-    cudaMalloc(&maxvals, tb_size*sizeof(float));
-    max_reduction<<<tb_size, grid_size>>>(tb_size, preatt_p, T);
-    max_reduction<<<1, tb_size>>>(maxvals, maxvals, tb_size);
-    maxval = maxvals[0];
-    //sum reduction
-    float sum = 0;
-    int tb_size = 1024;
-    int grid_size = (T+tb_size-1)/tb_size/2;
-    float* maxvals;
-    cudaMalloc(&maxvals, tb_size*sizeof(float));
-    max_reduction<<<tb_size, grid_size>>>(tb_size, preatt_p, T);
-    max_reduction<<<1, tb_size>>>(maxvals, maxvals, tb_size);
-    float expinv = (sum==0.0f) ? 0.0f : 1.0f/sum;
-    for(int t2=0;t2<T;t2++){
-        if(t2<=t){
-            att_p[t2] *= expinv;
+    if(t2>t){
+        att_p[t2] = 0.0f;
+    }
+
+    float maxval = 0.0f;
+    float sum = 0.0f;
+    
+    __shared__ float sdata_max[1024];
+    __shared__ float sdata_sum[1024];
+    
+    sdata_max[threadIdx.x] = preatt_p[t2];
+    __syncthreads();
+
+    for (unsigned int s=blockDim.x/2; s>0; s>>=1) {
+        if (threadIdx.x < s) {
+            sdata_max[threadIdx.x] = fmaxf(sdata_max[threadIdx.x], sdata_max[threadIdx.x + s]);
         }
-        else{
-            att_p[t2] = 0.0f;
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) {
+        maxval = sdata_max[0];
+    }
+    __syncthreads();
+    
+    sdata_sum[threadIdx.x] = att_p[t2];
+    __syncthreads();
+
+    for (unsigned int s=blockDim.x/2; s>0; s>>=1) {
+        if (threadIdx.x < s) {
+            sdata_sum[threadIdx.x] += sdata_sum[threadIdx.x + s];
         }
-    }   
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) {
+        sum = sdata_sum[0];
+    }
+    __syncthreads();
+
+    float expinv = (sum == 0.0f) ? 0.0f : 1.0f / sum;
+    att_p[t2] *= expinv;
 }
 
-
-
-
-__global__ void accumulate_kernel(){
-
+void softmax_gpu(float* preatt, float* att, int B, int T, int C, int NH){
+    dim3 threads(8,8,8);
+    dim3 blocks;
+    blocks.x = (B*T+7)/8;
+    blocks.y = (NH+7)/8;
+    blocks.z = (T+7)/8;
+    softmax_kernel<<<blocks, threads>>>(att, preatt, B, T, C, NH);
 }
 
+__global__ void accumulate_kernel(float* out, float* qkv, float* att, int B, int T, int C, int NH) {
+    int bt = blockIdx.x * blockDim.x + threadIdx.x;
+    int h = blockIdx.y * blockDim.y + threadIdx.y;
+    int t = blockIdx.z * blockDim.z + threadIdx.z;
+    int b = bt / (T);
+    int t2 = bt % T;
+    if(b >= B || t2 >= T || h >= NH || t >= T) {
+        return;
+    }
+    float* out_p = out + b * T * C + t * C + h * (C / NH);
+    float val = 0.0f;
+    #pragma unroll
+    for(int i = 0; i < T; i++) {
+        float value = qkv[b * T * 3 * C + i * 3 * C + 2 * C + h * (C / NH) + t2];
+        val += att[b * NH * T * T + h * T * T + t * T + i] * value;
+    }
+    out_p[t2] = val;
+}
 
-void accumulate(){
-
+void accumulate_gpu(float* out, float* qkv, float* att, int B, int T, int C, int NH){
+    dim3 threads(8, 8, 8);
+    dim3 blocks;
+    blocks.x = (B * T + 7) / 8;
+    blocks.y = (NH + 7) / 8;
+    blocks.z = (T + 7) / 8;
+    accumulate_kernel<<<blocks, threads>>>(out, qkv, att, B, T, C, NH);
 }
 
 __global__ void attention_forward_kernel(float* out, float* preatt, float* att, float* qkv, int B, int T, int C, int NH){
@@ -298,6 +253,28 @@ void attention_forward_gpu(float* out, float* preatt, float* att, float* qkv, in
     dim3 blocks((B+7)/8, (T+7)/8, (NH+7)/8);
     attention_forward_kernel<<<blocks, threads>>>(out, preatt, att, qkv, B, T, C, NH);
 }
+void attention_forward_gpu2(float* out, float* preatt, float* att, float* qkv, int B, int T, int C, int NH){
+    dim3 threads_preatt(8,8,8);
+    dim3 blocks_preatt;
+    blocks_preatt.x = (B*T+7)/8;
+    blocks_preatt.y = (NH+7)/8;
+    blocks_preatt.z = (T+7)/8;
+    preatt_kernel<<<blocks_preatt, threads_preatt>>>(preatt, qkv, B, T, C, NH);
+
+    dim3 threads_softmax(8,8,8);
+    dim3 blocks_softmax;
+    blocks_softmax.x = (B*T+7)/8;
+    blocks_softmax.y = (NH+7)/8;
+    blocks_softmax.z = (T+7)/8;
+    softmax_kernel<<<blocks_softmax, threads_softmax>>>(att, preatt, B, T, C, NH);
+
+    dim3 threads_accumulate(8, 8, 8);
+    dim3 blocks_accumulate;
+    blocks_accumulate.x = (B * T + 7) / 8;
+    blocks_accumulate.y = (NH + 7) / 8;
+    blocks_accumulate.z = (T + 7) / 8;
+    accumulate_kernel<<<blocks_accumulate, threads_accumulate>>>(out, qkv, att, B, T, C, NH);
+}
 
 void rand_init(float* arr, int size){
     for(int i = 0;i<size;i++){
@@ -332,15 +309,7 @@ int main(){
     rand_init(att, B*NH*T*T);
     rand_init(qkv, B*T*3*C);
 
-    srand(time(NULL));
-    clock_t start, end;
-    double time_used;
-    start = clock();
     attention_forward(out, preatt, att, qkv, B, T, C, NH);
-    end = clock();
-    time_used = ((double) (end - start)) / CLOCKS_PER_SEC;
-    printf("CPU Time: %f\n", time_used);
-
     //gpu
     float *d_preatt, *d_att, *d_qkv, *d_out;
     cudaMalloc(&d_preatt, B*NH*T*T*sizeof(float));
@@ -353,21 +322,8 @@ int main(){
     cudaMemcpy(d_qkv, qkv, B*T*3*C*sizeof(float), cudaMemcpyHostToDevice);
     cudaDeviceSynchronize();
 
-    cudaEvent_t start_gpu, stop_gpu;
-    cudaEventCreate(&start_gpu);
-    cudaEventCreate(&stop_gpu);
-    cudaEventRecord(start_gpu);
-
     attention_forward_gpu(d_out, d_preatt, d_att, d_qkv, B, T, C, NH);
     
-    cudaEventRecord(stop_gpu);
-    cudaEventSynchronize(stop_gpu);
-    float milliseconds = 0;
-    cudaEventElapsedTime(&milliseconds, start_gpu, stop_gpu);
-
-    time_used = milliseconds / 1000.0;
-    printf("GPU Time: %f\n", time_used);
-
     float* check_out;
     check_out = (float*)malloc(B*T*C*sizeof(float));
     cudaMemcpy(check_out, d_out, B*T*C*sizeof(float), cudaMemcpyDeviceToHost);
@@ -381,25 +337,11 @@ int main(){
     printf("Correct output Yay!\n");
 
     //preatt kernel
-    
-    float *d_maxval;
-    cudaMalloc(&d_maxval, B*NH*T*sizeof(float));
     float* another_d_preatt;
     cudaMalloc(&another_d_preatt, B*NH*T*T*sizeof(float));
 
-    cudaEvent_t start_gpu2, stop_gpu2;
-    cudaEventCreate(&start_gpu2);
-    cudaEventCreate(&stop_gpu2);
-    cudaEventRecord(start_gpu2);
-
-    preatt_gpu(another_d_preatt, d_maxval, d_qkv, B, T, C, NH);
+    preatt_gpu(another_d_preatt, d_qkv, B, T, C, NH);
     cudaDeviceSynchronize();
-    cudaEventRecord(start_gpu2);
-    cudaEventSynchronize(stop_gpu2);
-    float milliseconds2 = 0;
-
-    cudaEventElapsedTime(&milliseconds2, start_gpu2, stop_gpu2);
-    printf("GPU Preatt Time: %f\n", milliseconds2/ 1000.0);
 
     float* preatt_check1;
     preatt_check1 = (float*)malloc(B*NH*T*T*sizeof(float));
@@ -424,6 +366,57 @@ int main(){
 
     //softmax
     //
+    float* softmax_att;
+    cudaMalloc(&softmax_att, B*NH*T*T*sizeof(float));
+    softmax_gpu(softmax_att, another_d_preatt, B, T, C, NH);
+
+    float* softmax_check;
+    softmax_check = (float*)malloc(B*NH*T*T*sizeof(float));
+    cudaMemcpy(softmax_check, d_att, B*NH*T*T*sizeof(float), cudaMemcpyDeviceToHost);
+    for(int i=0;i<B*NH*T*T;i++){
+        if(abs(softmax_check[i] - att[i]) > 1e-3f){
+            printf("Incorrect softmax output Try Again!\n");
+            return 0;
+        }
+    }
+    printf("Correct softmax output Yay!\n");
+
+
+    //accumulate
+    float* accumulate_out;
+    cudaMalloc(&accumulate_out, B*T*C*sizeof(float));
+    accumulate_gpu(accumulate_out, d_qkv, softmax_att, B, T, C, NH);
+
+    float* accumulate_check;
+    accumulate_check = (float*)malloc(B*T*C*sizeof(float));
+    cudaMemcpy(accumulate_check, d_out, B*T*C*sizeof(float), cudaMemcpyDeviceToHost);
+    int i = 0;
+    for(int i=0;i<B*T*C;i++){
+        if(abs(accumulate_check[i] - out[i]) > 1e-3f){
+            i+=1;
+        }
+    }
+    printf("Incorrect output at %d times out of %d times\n",i,B*T*C);
+    printf("Correct accumulate output Yay!\n");
+
+    //attention forward
+    float* final_out;
+    cudaMalloc(&final_out, B*T*C*sizeof(float));
+    
+    attention_forward_gpu2(final_out, d_preatt, d_att, d_qkv, B, T, C, NH);
+
+    float* final_check;
+    final_check = (float*)malloc(B*T*C*sizeof(float));
+    cudaMemcpy(final_check, d_out, B*T*C*sizeof(float), cudaMemcpyDeviceToHost);
+    int ii = 0;
+    for(int i=0;i<B*T*C;i++){
+        if(abs(accumulate_check[i] - out[i]) > 1e-3f){
+            ii+=1;
+        }
+    }
+    printf("Incorrect output at %d times out of %d times\n",ii,B*T*C);
+    printf("Correct accumulate output Yay!\n");
+    printf("Correct output Yay!\n");
 
     return 0;
 }

@@ -323,7 +323,7 @@ int main(){
     fill_act_sizes(model.act_sizes, model.config, B);
     alloc_activations(&model.act, model.act_sizes);
     
-    int max_tokens = 16;
+    int max_tokens = 2;
 
     printf("Inputs will take %lu MB\n",(T+max_tokens) * sizeof(int) / (1024 * 1024));
     int* inputs;

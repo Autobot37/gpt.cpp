@@ -134,72 +134,154 @@ void residual_forward(float* out, float* inp, float* skip, int dim){
 }
 //-------------------------------------------
 
-__global__ void attention_forward_kernel(float* out, float* preatt, float* att, float* qkv, int B, int T, int C, int NH){
-    int b = blockIdx.x * blockDim.x + threadIdx.x;
-    int t = blockIdx.y * blockDim.y + threadIdx.y;
-    if(b>=B || t>=T){
+__global__ void preatt_kernel(float* preatt,float* qkv, int B, int T, int C, int NH){
+    int bt = blockIdx.x * blockDim.x + threadIdx.x;
+    int h = blockIdx.y * blockDim.y + threadIdx.y;
+    int t2 = blockIdx.z * blockDim.z + threadIdx.z;
+    int b = bt / T;
+    int t = bt % T;
+    if(b>=B || t>=T || h>=NH || t2>=T){
         return;
     }
     int hs = C/NH;
     float scale = 1.0 / sqrtf(hs);
-    for(int h = 0;h<NH;h++){
-        float* query = qkv + b * T * 3 * C + t * 3 * C + h * hs;
-        float* preatt_p = preatt + b*NH*T*T + h*T*T + t*T;
-        float* att_p = att + b*NH*T*T + h*T*T + t*T;
+    float* query = qkv + b * T * 3 * C + t * 3 * C + h * hs;
+    float* preatt_p = preatt + b*NH*T*T + h*T*T + t*T;
+    float* key = qkv + b * T * 3 * C + t2 * 3 * C + h*hs + C;
 
-        float maxval = 1e-5f;
-        #pragma omp simd reduction(max:maxval)
-        for(int t2=0;t2<=t;t2++){
-            float* key = qkv + b * T * 3 * C + t2 * 3 * C + h*hs + C;
-            float val = 0.0f;
-            #pragma omp simd reduction(+:val)
-            for(int i = 0;i<hs;i++){
-                val += query[i] * key[i];
-            }
-            val *= scale;
-            if(val>maxval){
-                maxval = val;
-            }
-            preatt_p[t2] = val;
-        }
-        //softmax
-        float sum = 0.0f;
-        #pragma omp simd reduction(+:sum)
-        for(int t2=0;t2<=t;t2++){
-            float val = expf(preatt_p[t2] - maxval);
-            att_p[t2] = val;
-            sum += val;
-        }
-        float expinv = (sum==0.0f) ? 0.0f : 1.0f/sum;
-        #pragma omp simd
-        for(int t2=0;t2<T;t2++){
-            if(t2<=t){
-                att_p[t2] *= expinv;
-            }
-            else{
-                att_p[t2] = 0.0f;
-            }
-        }   
-        //accumulating
-        float* out_p = out + b*T*C + t*C + h*hs;
-        #pragma omp simd
-        for(int t2=0;t2<hs;t2++){
-            float val = 0.0f;
-            #pragma omp simd reduction(+:val)
-            for(int i = 0;i<T;i++){
-                float value = qkv[b*T*3*C + i*3*C + 2*C + h*hs + t2];
-                val += att_p[i] * value;
-            }
-            out_p[t2] = val;
-        }
+    if(t2>t){
+        preatt_p[t2] = 0.0f;
     }
-}
-void attention_forward(float* out, float* preatt, float* att, float* qkv, int B, int T, int C, int NH){
-    dim3 threads(32, 32);
-    dim3 blocks((B+31)/32, (T+31)/32);
-    attention_forward_kernel<<<blocks, threads>>>(out, preatt, att, qkv, B, T, C, NH);
+    //key @ query 
+    float val = 0.0f;
+    for(int i = 0;i<hs;i++){
+        val += query[i] * key[i];
+    }
+    val *= scale;
+    preatt_p[t2] = val;
 }
 
+void preatt_gpu(float* preatt, float* qkv, int B, int T, int C, int NH){
+    dim3 threads(8,8,8);
+    dim3 blocks;
+    blocks.x = (B*T+7)/8;
+    blocks.y = (NH+7)/8;
+    blocks.z = (T+7)/8;
+    preatt_kernel<<<blocks, threads>>>(preatt, qkv, B, T, C, NH);
+}
+
+__global__ void softmax_kernel(float* att, float* preatt, int B, int T, int C, int NH){
+    int bt = blockIdx.x * blockDim.x + threadIdx.x;
+    int h = blockIdx.y * blockDim.y + threadIdx.y;
+    int t2 = blockIdx.z * blockDim.z + threadIdx.z;
+    int b = bt / T;
+    int t = bt % T;
+    if(b>=B || t>=T || h>=NH || t2>=T){
+        return;
+    }
+    float* preatt_p = preatt + b*NH*T*T + h*T*T + t*T;
+    float* att_p = att + b*NH*T*T + h*T*T + t*T;
+    if(t2>t){
+        att_p[t2] = 0.0f;
+    }
+
+    float maxval = 0.0f;
+    float sum = 0.0f;
+    
+    __shared__ float sdata_max[1024];
+    __shared__ float sdata_sum[1024];
+    
+    sdata_max[threadIdx.x] = preatt_p[t2];
+    __syncthreads();
+
+    for (unsigned int s=blockDim.x/2; s>0; s>>=1) {
+        if (threadIdx.x < s) {
+            sdata_max[threadIdx.x] = fmaxf(sdata_max[threadIdx.x], sdata_max[threadIdx.x + s]);
+        }
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) {
+        maxval = sdata_max[0];
+    }
+    __syncthreads();
+    
+    sdata_sum[threadIdx.x] = att_p[t2];
+    __syncthreads();
+
+    for (unsigned int s=blockDim.x/2; s>0; s>>=1) {
+        if (threadIdx.x < s) {
+            sdata_sum[threadIdx.x] += sdata_sum[threadIdx.x + s];
+        }
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) {
+        sum = sdata_sum[0];
+    }
+    __syncthreads();
+
+    float expinv = (sum == 0.0f) ? 0.0f : 1.0f / sum;
+    att_p[t2] *= expinv;
+}
+
+void softmax_gpu(float* preatt, float* att, int B, int T, int C, int NH){
+    dim3 threads(8,8,8);
+    dim3 blocks;
+    blocks.x = (B*T+7)/8;
+    blocks.y = (NH+7)/8;
+    blocks.z = (T+7)/8;
+    softmax_kernel<<<blocks, threads>>>(att, preatt, B, T, C, NH);
+}
+
+__global__ void accumulate_kernel(float* out, float* qkv, float* att, int B, int T, int C, int NH) {
+    int bt = blockIdx.x * blockDim.x + threadIdx.x;
+    int h = blockIdx.y * blockDim.y + threadIdx.y;
+    int t = blockIdx.z * blockDim.z + threadIdx.z;
+    int b = bt / (T);
+    int t2 = bt % T;
+    if(b >= B || t2 >= T || h >= NH || t >= T) {
+        return;
+    }
+    float* out_p = out + b * T * C + t * C + h * (C / NH);
+    float val = 0.0f;
+    #pragma unroll
+    for(int i = 0; i < T; i++) {
+        float value = qkv[b * T * 3 * C + i * 3 * C + 2 * C + h * (C / NH) + t2];
+        val += att[b * NH * T * T + h * T * T + t * T + i] * value;
+    }
+    out_p[t2] = val;
+}
+
+void accumulate_gpu(float* out, float* qkv, float* att, int B, int T, int C, int NH){
+    dim3 threads(8, 8, 8);
+    dim3 blocks;
+    blocks.x = (B * T + 7) / 8;
+    blocks.y = (NH + 7) / 8;
+    blocks.z = (T + 7) / 8;
+    accumulate_kernel<<<blocks, threads>>>(out, qkv, att, B, T, C, NH);
+}
+
+void attention_forward(float* out, float* preatt, float* att, float* qkv, int B, int T, int C, int NH){
+    dim3 threads_preatt(8,8,8);
+    dim3 blocks_preatt;
+    blocks_preatt.x = (B*T+7)/8;
+    blocks_preatt.y = (NH+7)/8;
+    blocks_preatt.z = (T+7)/8;
+    preatt_kernel<<<blocks_preatt, threads_preatt>>>(preatt, qkv, B, T, C, NH);
+
+    dim3 threads_softmax(8,8,8);
+    dim3 blocks_softmax;
+    blocks_softmax.x = (B*T+7)/8;
+    blocks_softmax.y = (NH+7)/8;
+    blocks_softmax.z = (T+7)/8;
+    softmax_kernel<<<blocks_softmax, threads_softmax>>>(att, preatt, B, T, C, NH);
+
+    dim3 threads_accumulate(8, 8, 8);
+    dim3 blocks_accumulate;
+    blocks_accumulate.x = (B * T + 7) / 8;
+    blocks_accumulate.y = (NH + 7) / 8;
+    blocks_accumulate.z = (T + 7) / 8;
+    accumulate_kernel<<<blocks_accumulate, threads_accumulate>>>(out, qkv, att, B, T, C, NH);
+}
 //---------------------------------------------
 __global__ void gelu_forward_kernel(float* out, float* inp, int dim){
     int i = blockIdx.x * blockDim.x + threadIdx.x;
