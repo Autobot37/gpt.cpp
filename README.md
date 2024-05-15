@@ -7,7 +7,7 @@
 - inference implementation.
 
 # Todo
-- Optimising Attention_forward kernel.
+- Optimizing Attention_forward kernel.
 - profiling and further optimizing based on profile.
 
 # To run
