@@ -3,6 +3,7 @@
 #include <time.h>
 #include <cuda_runtime.h>
 #include <omp.h>
+#include <cublas_v2.h>
 
 __global__ void matmul_gpu_kernel(float* out, float* inp, float* weight, float* bias, int B, int T, int C, int OC){
     int tx = threadIdx.x;
@@ -50,6 +51,33 @@ void matmul_forward(float* out, float* inp, float* weight, float* bias, int B, i
         }
     }
 }
+
+__global__ void add_bias(float* out, const float* bias, int B, int T, int OC) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < OC * B * T) {
+        int oc = idx / (B * T);
+        out[idx] += bias[oc];
+    }
+}
+
+void matmul_forward2(float* d_out,
+                     const float* d_inp, const float* d_weight, const float* d_bias,
+                     int B, int T, int C, int OC) {
+    int sqrt_block_size = 32;
+    cublasHandle_t cublas_handle;
+    cublasCreate(&cublas_handle);
+    const float alpha = 1.0f;
+    const float beta = 0.0f;
+    cublasSgemm(cublas_handle, CUBLAS_OP_T, CUBLAS_OP_N, OC, B * T, C,
+                             &alpha, d_weight, C, d_inp, C, &beta, d_out, OC);
+    if (d_bias != nullptr) {
+        int block_size = sqrt_block_size * sqrt_block_size;
+        int grid_size = (OC * B * T + block_size - 1) / block_size;
+        add_bias<<<grid_size, block_size>>>(d_out, d_bias, B, T, OC);
+    }
+    cublasDestroy(cublas_handle);
+}
+
 
 void rand_init(float* arr, int size){
     for(int i = 0;i<size;i++){
@@ -108,8 +136,6 @@ int main(){
     cudaMemcpy(check_input, d_inp, B*T*C*sizeof(float), cudaMemcpyDeviceToHost);
     cudaDeviceSynchronize();
 
-    print_3d(inp, B, T, C);
-    print_3d(check_input, B, T, C);
 
     for(int i = 0;i<B*T*C;i++){
         if(abs(inp[i] - check_input[i]) > 1e-3f){
@@ -125,20 +151,22 @@ int main(){
     mid = clock();
     cpu_time_used = ((double) (mid - start)) / CLOCKS_PER_SEC;
 
+    cudaEvent_t start_gpu, stop_gpu;
+    cudaEventCreate(&start_gpu);
+    cudaEventCreate(&stop_gpu);
+    cudaEventRecord(start_gpu);
+
     matmul_forward_gpu(d_out, d_inp, d_weight, d_bias, B, T, C, OC);
-    cudaDeviceSynchronize();
-    end = clock();
-    gpu_time_used = ((double) (end - mid)) / CLOCKS_PER_SEC;
+
+    cudaEventRecord(stop_gpu);
+    cudaEventSynchronize(stop_gpu);
+    float milliseconds = 0;
+    cudaEventElapsedTime(&milliseconds, start_gpu, stop_gpu);
 
     cudaMemcpy(check, d_out, B*T*OC*sizeof(float), cudaMemcpyDeviceToHost);
 
     printf("CPU time used: %f\n", cpu_time_used);
-    printf("GPU time used: %f\n", gpu_time_used);
-    int faster = (int)(cpu_time_used / gpu_time_used);
-    printf("GPU is %d times faster than CPU\n", faster);
-
-    print_3d(out, B, T, OC);
-    print_3d(check, B, T, OC);
+    printf("GPU time: %f\n", milliseconds/1000.0f);
 
     for(int i = 0;i<B*T*OC;i++){
         if(abs(out[i] - check[i] > 1e-3f)){
@@ -149,19 +177,30 @@ int main(){
 
     printf("And Correct too!\n");
 
-    free(inp);
-    free(weight);
-    free(bias);
-    free(out);
-    free(check);
-    cudaFree(d_inp);
-    cudaFree(d_weight);
-    cudaFree(d_bias);
-    cudaFree(d_out);
+    //
+        //matmul_forward2
+    float* another_out = (float*)malloc(B*T*OC*sizeof(float));
+    float* d_another_out;
+    cudaMalloc(&d_another_out, B*T*OC*sizeof(float));
+    cudaEvent_t start_gpu2, stop_gpu2;
+    cudaEventCreate(&start_gpu2);
+    cudaEventCreate(&stop_gpu2);
+    cudaEventRecord(start_gpu2);
+    matmul_forward2(d_another_out, d_inp, d_weight, d_bias, B, T, C, OC);
+    cudaEventRecord(stop_gpu2);
+    cudaEventSynchronize(stop_gpu2);
+    float milliseconds2 = 0;
+    cudaEventElapsedTime(&milliseconds2, start_gpu2, stop_gpu2);
+    printf("GPU time sgemm: %f\n", milliseconds2/1000.0f);
 
-
-
-
+    cudaMemcpy(another_out, d_another_out, B*T*OC*sizeof(float), cudaMemcpyDeviceToHost);
+    for(int i=0;i<B*T*OC;i++){
+        if((out[i] - another_out[i]) > 1e-5){
+            printf("Incorrect try again\n");
+            return 0;
+        }
+    }
+    printf("Correct Sgemm\n");
 
     return 0;
 }

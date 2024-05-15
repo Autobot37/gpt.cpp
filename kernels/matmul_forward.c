@@ -1,9 +1,18 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <time.h>
 #include <omp.h>
-#pragma GCC target("avx2")
+#include <x86intrin.h>
+#include <string.h>
 
+typedef int vec __attribute__ ((vector_size (32)));
+
+#define min(a,b) ((a) < (b) ? (a) : (b))
+
+vec* alloc(int n){
+    vec* ptr = (vec*)aligned_alloc(32, n*sizeof(vec));
+    memset(ptr, 0, n*sizeof(vec));
+    return ptr;
+}
 //inp(B,T,C) @  weight(3*C, C).T -> out(B,T,3*C)
 void matmul_forward(float* out, float* inp, float* weight, float* bias, int B, int T, int C, int OC){
     #pragma omp parallel for collapse(2) schedule(static)    
@@ -24,7 +33,33 @@ void matmul_forward(float* out, float* inp, float* weight, float* bias, int B, i
     }
 }
 
-void matmul_normal(float* out, float* a, float* _b, int N){
+void matmul_simd(float* out, float* _a, float* _b, int N){
+    
+    int nB = (N+8)/8;
+    vec* a = alloc(N*nB);
+    vec* b = alloc(N*nB);
+
+    for(int i = 0;i<N;i++){
+        for(int j = 0;j<N;j++){
+            a[i*nB + j/8][j%8] = _a[i*N + j];
+            b[i*nB + j/8][j%8] = _b[j*N + i];
+        }
+    }
+    for(int i = 0;i<N;i++){
+        for(int j = 0;j<N;j++){
+            vec s = {};
+
+            for(int k = 0;k<nB;k++){
+                s += a[i*nB+k] * b[j*nB+k];
+            }
+            for(int k = 0;k<8;k++){
+                out[i*N+j] += s[k];
+            }
+        }
+    }
+}
+
+void matmul_normal(float* __restrict__ out, float* a, float* _b, int N){
     float* b = (float*)malloc(N*N*sizeof(float));
     for(int i=0;i<N;i++){
         for(int j = 0;j<N;j++){
@@ -48,6 +83,7 @@ void rand_init(float* arr, int size){
     }
 }
 
+
 int main(){
 
     int mul = 4;
@@ -65,33 +101,19 @@ int main(){
     rand_init(weight, OC*C);
     rand_init(bias, OC);
 
-    clock_t start, mid;
-    double cpu_time_used;
-    start = clock();
     matmul_forward(out, inp, weight, bias, B, T, C, OC);
-    mid = clock();
-    cpu_time_used = ((double) (mid - start)) / CLOCKS_PER_SEC;
-    printf("CPU time used: %f\n", cpu_time_used);
-
     //normal
-    int N = 1024;
+    int N = 1920;
     float *a, *b, *c;
     a = (float*)malloc(N*N*sizeof(float));
     b = (float*)malloc(N*N*sizeof(float));
     c = (float*)malloc(N*N*sizeof(float));
-    start = clock();
     matmul_normal(c, a, b, N);
-    mid = clock();
-    cpu_time_used = ((double) (mid - start)) / CLOCKS_PER_SEC;
-    printf("CPU UNBATCHED time used: %f\n", cpu_time_used);
-
-    free(inp);
-    free(weight);
-    free(bias);
-    free(out);
-    free(a);
-    free(b);
-    free(c);
+    //SIMD
+    matmul_simd(c, a, b, N);    
+    //blocked
+    matmul_kernel(c, a, b, N);
+    
 
     return 0;
 }

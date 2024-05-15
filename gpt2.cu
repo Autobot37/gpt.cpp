@@ -323,7 +323,7 @@ int main(){
     fill_act_sizes(model.act_sizes, model.config, B);
     alloc_activations(&model.act, model.act_sizes);
     
-    int max_tokens = 2;
+    int max_tokens = 16;
 
     printf("Inputs will take %lu MB\n",(T+max_tokens) * sizeof(int) / (1024 * 1024));
     int* inputs;
@@ -338,9 +338,11 @@ int main(){
     // gpt_forward(&model, inputs, B);
     // // print_3d(model.act.encoded, B, T, V);
 
-    clock_t start, end;
-    start = clock();
-
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+    cudaEventRecord(start);
+    
     float* cpu_probs = (float*)mallocCheck(B * T * V * sizeof(float));
 
     printf("Generated text: ");
@@ -358,7 +360,7 @@ int main(){
                 max_ind = j;
             }
         }
-        // max_ind = (int)rand() % V;
+        max_ind = (int)rand() % V;
         printf("%s ", tokenizer_decode(&tokenizer, max_ind));
         fflush(stdout);
         cpuinputs[T] = max_ind;
@@ -366,10 +368,13 @@ int main(){
         cudaMemcpy(inputs, cpuinputs, (T+max_tokens-i) * sizeof(int), cudaMemcpyHostToDevice);
     }
     printf("\n");
-    end = clock();
-    double cpu_time_used = ((double) (end - start)) / CLOCKS_PER_SEC;
-    printf("GPU time used: %f seconds\n", cpu_time_used);
-    float tok_per_sec = (float)max_tokens / cpu_time_used;
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+    float milliseconds = 0;
+    cudaEventElapsedTime(&milliseconds, start, stop);
+    printf("GPU Used time: %f s\n", milliseconds/1000.0f);
+
+    float tok_per_sec = (float)max_tokens / (milliseconds / 1000.0f);
     printf("Tokens per second: %f\n", tok_per_sec);
 
     tokenizer_free(&tokenizer);

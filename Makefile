@@ -1,11 +1,11 @@
 CPU_SRC ?= gpt2.c
 CUDA_SRC ?= gpt2.cu
 
-CFLAGS = -march=native -ffast-math -O3 -funroll-loops
+CFLAGS = -march=native -ffast-math -O3 -funroll-loops 
 LDFLAGS = -lm
 
 NVCCFLAGS = -O3 --use_fast_math -Xcompiler -fopenmp
-CUDA_LDFLAGS = -lcublas -lcublasLt -lm
+CUDA_LDFLAGS = -lcublas -lcublasLt -lm -lcurand
 
 EXECUTABLE = executable
 

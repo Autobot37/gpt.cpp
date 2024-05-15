@@ -294,7 +294,7 @@ int main(){
     int B = 1;
     fill_act_sizes(model.act_sizes, model.config, B);
     alloc_activations(&model.act, model.act_sizes);
-    int max_tokens = 16;
+    int max_tokens = 1;
     int* inputs = (int*)mallocCheck((T+max_tokens)  * sizeof(int));
     for(int i = 0;i<T;i++){
         inputs[i] = 1;

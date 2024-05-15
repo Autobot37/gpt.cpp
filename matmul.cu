@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <cuda_runtime.h>
 #include <omp.h>
+#include <cublas_v2.h>
 
 //n,m @ m,k -> n k
 void matmul_cpu(float* out, float* a, float* b, int N, int M, int K){
@@ -53,6 +54,7 @@ void matmul_gpu(float* out, float* a, float* b, int N, int M, int K){
     matmul_gpu_kernel<<<grid_size, block_size>>>(out, a, b, N, M, K);
 }
 
+
 int main(){ 
     
     int N = 1024;
@@ -70,16 +72,27 @@ int main(){
     cudaMemcpy(d_a, a, N*M*sizeof(float), cudaMemcpyHostToDevice);
     cudaMemcpy(d_b, b, M*K*sizeof(float), cudaMemcpyHostToDevice);
 
-
-    clock_t start_time = clock();
-    matmul_gpu(out, a, b, N, M, K);
-    clock_t mid_time = clock();
-    double time1 = (double)(mid_time - start_time) / CLOCKS_PER_SEC;
-    printf("GPU time: %f\n", time1);
-
+    cudaEvent_t start_gpu, stop_gpu;
+    cudaEventCreate(&start_gpu);
+    cudaEventCreate(&stop_gpu);
+    cudaEventRecord(start_gpu);
+    
+    matmul_gpu(d_out, d_a, d_b, N, M, K);
+    cudaEventRecord(stop_gpu);
+    cudaEventSynchronize(stop_gpu);
+    float milliseconds = 0;
+    cudaEventElapsedTime(&milliseconds, start_gpu, stop_gpu);
+    printf("GPU time: %f\n", milliseconds);
+    
+    cudaEvent_t start_cpu, stop_cpu;
+    cudaEventCreate(&start_cpu);
     matmul_cpu(out, a, b, N, M, K);
-    double time2 = (double)(clock() - mid_time) / CLOCKS_PER_SEC;
-    printf("CPU time: %f\n", time2);
+    cudaEventCreate(&stop_cpu);
+    cudaEventRecord(stop_cpu);
+    cudaEventSynchronize(stop_cpu);
+    float time1 = 0;
+    cudaEventElapsedTime(&time1, start_cpu, stop_cpu);
+    printf("CPU time: %f\n", time1);
 
     float* check = (float*)malloc(N*K*sizeof(float));
     cudaMemcpy(check, d_out, N*K*sizeof(float), cudaMemcpyDeviceToHost);
@@ -89,8 +102,6 @@ int main(){
             break;
         }
     }
-    int faster = (int)time2 / time1;
-    printf("GPU is %d times faster than CPU\n", faster);
     printf("And it is correct too\n");
 
     cudaFree(d_a);
