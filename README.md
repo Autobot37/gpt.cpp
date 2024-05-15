@@ -11,11 +11,12 @@
 - profiling and further optimizing based on profile.
 
 # To run
-'''
+'''bash
 git clone -b cuda https://github.com/Autobot37/gpt.cpp
 python3 pythonscripts/prepare_tokenizer.py
 python3 writestate.py
 make run_cuda
+'''
 
 # Dependencies
 - python tiktoken module.
