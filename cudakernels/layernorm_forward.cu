@@ -1,8 +1,9 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <time.h>
 #include <math.h>
 #include <cuda_runtime.h>
+#include <cooperative_groups.h>
+#include <cooperative_groups/reduce.h>
 
 void layernorm_forward(float* out, float* mean, float* std_dev, float* inp, float* weight, float* bias, int B, int T, int C){
     float eps = 1e-5f;
@@ -35,41 +36,50 @@ void layernorm_forward(float* out, float* mean, float* std_dev, float* inp, floa
 }
 
 __global__ void layernorm_forward_kernel(float* out, float* mean, float* std_dev, float* inp, float* weight, float* bias, int B, int T, int C){
-    int b = blockIdx.x * blockDim.x + threadIdx.x;
-    int t = blockIdx.y * blockDim.y + threadIdx.y;
-    if(b>=B || t>=T){
+    namespace cg = cooperative_groups;
+    cg::thread_block block = cg::this_thread_block();
+    cg::thread_block_tile<32> warp = cg::tiled_partition<32>(block);  
+    int idx = blockIdx.x *  warp.meta_group_size() + warp.meta_group_rank();
+    int N = B * T;
+    if(idx >= N){
         return;
     }
-    float eps = 1e-5f;
-    float* inp_p = inp + b*T*C + t*C;
-    float* out_p = out + b*T*C + t*C;
-                
-    float m = 0.0f;
-    for(int i=0;i<C;i++){
-        m += inp_p[i];
-    }
-    m = m/C;
-    mean[b*T + t] = m;
+    float* x = inp + idx * C;
 
-    float v = 0.0f;
-    for(int i = 0;i<C;i++){
-        float diff = inp_p[i] - m;
-        v += diff * diff;
+    float sum = 0.0f;
+    for(int i = warp.thread_rank();i<C;i+=warp.size()){
+        sum += x[i];
     }
-    v = v / C;
-    float s = 1.0f/sqrtf(v + eps);
-    std_dev[b*T + t] = s;
+    sum = cg::reduce(warp, sum, cg::plus<float>());
+    float m = sum / C;
+    if(warp.thread_rank == 0 && mean != nullptr){
+        __stcs(mean + idx, m);
+    }
 
-    for(int i = 0;i<C;i++){
-        out_p[i] = ((inp_p[i] - m) * s) * weight[i] + bias[i];            
+    //rstd
+    sum = 0.0f;
+    for(int i = warp.thread_rank();i<C;i+=warp.size()){
+        float diff = x[i] - m;
+        sum += diff * diff;
+    }
+    sum = cg::reduce(warp, sum, cg::plus<float>());
+    float s = rsqrtf(sum/C + 1e-5f);
+    if(warp.thread_rank == 0 && std_dev != nullptr){
+        __stcs(std_dev + idx, s);
+    }
+    float* o = out + idx * C;
+
+    for(int c = warp.thread_rank();c<C;c+=warp.size()){
+        float n = s * (__ldcs(x + c) - m);
+        __stcs(o+c, n * weight[c] + bias[c]);
     }
 }
 
 void layernorm_forward_gpu(float* out, float* mean, float* std_dev, float* inp, float* weight, float* bias, int B, int T, int C){
-    dim3 threadsPerBlock(4, 256);
-    dim3 numBlocks((B + threadsPerBlock.x - 1)/threadsPerBlock.x, (T + threadsPerBlock.y - 1)/threadsPerBlock.y);
-    layernorm_forward_kernel<<<numBlocks, threadsPerBlock>>>(out, mean, std_dev, inp, weight, bias, B, T, C);
-    cudaDeviceSynchronize();
+    int N = B * T;
+    int numThreads = 512;
+    int grid_size = (N * 32 + numThreads - 1) / numThreads;
+    layernorm_forward_kernel<<<grid_size, numThreads>>>(out, mean, std_dev, inp, weight, bias, B, T, C);
 }
 
 void rand_init(float* arr, int size){
@@ -80,10 +90,9 @@ void rand_init(float* arr, int size){
 
 int main(){
 
-    int mul = 4;
-    int B = 4*mul;
-    int T = 128*mul;
-    int C = 128*mul;
+    int B = 4;
+    int T = 1024;
+    int C = 2048;
 
     float* inp = (float*)malloc(B*T*C*sizeof(float));
     float* out = (float*)malloc(B*T*C*sizeof(float));

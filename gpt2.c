@@ -5,6 +5,10 @@
 #include <string.h>
 #include <stdint.h>
 #include <omp.h>
+#include <cblas.h>
+#include <cblas-openblas.h>
+#include <cfloat>
+
 #include "kernels/kernels.h"
 #include "tokenizer.h"
 
@@ -260,24 +264,27 @@ void gpt_forward(GPT* model, int* inputs, int B){
         float* residual3 = act.residual3 + l * B * T * C;
 
         layernorm_forward(ln_l1_out, ln_l1_mean, ln_l1_rstd, act.encoded, ln_l1_w, ln_l1_b, B, T, C);
-        matmul_forward(qkv, ln_l1_out, c_attn_w, c_attn_b, B, T, C, C);
-        attention_forward(atty, preatt, att, qkv, B, T, C, NH);
-        matmul_forward(attproj, atty, c_proj_w, c_proj_b, B, T, C, C);
+        matmul_forward_blas(qkv, ln_l1_out, c_attn_w, c_attn_b, B, T, C, C);
+        attention_forward_blas(atty, preatt, att, qkv, B, T, C, NH);
+        matmul_forward_blas(attproj, atty, c_proj_w, c_proj_b, B, T, C, C);
         residual_forward(residual2, residual, attproj, B*T*C);
         layernorm_forward(ln_l2_out, ln_l2_mean, ln_l2_rstd, residual2, ln_l2_w, ln_l2_b, B, T, C);
-        matmul_forward(c_fc, ln_l2_out, c_fc_w, c_fc_b, B, T, C, 4*C);
+        matmul_forward_blas(c_fc, ln_l2_out, c_fc_w, c_fc_b, B, T, C, 4*C);
         gelu_forward(fc_gelu, c_fc, B*T*4*C);
-        matmul_forward(c_proj, fc_gelu, mlp_proj_w, mlp_proj_b, B, T, 4*C, C);
+        matmul_forward_blas(c_proj, fc_gelu, mlp_proj_w, mlp_proj_b, B, T, 4*C, C);
         residual_forward(residual3, residual2, c_proj, B*T*C);
     }
     residual = act.residual3 + (L-1) * B * T * C;
     layernorm_forward(act.ln_f, act.ln_f_mean, act.ln_f_rstd, residual, weights.ln_f_w, weights.ln_f_b, B, T, C);
-    matmul_forward(act.logits, act.ln_f, weights.wte, NULL, B, T, C, V);
-    softmax_forward(act.probs, act.logits, B, T, V);
+    matmul_forward_blas(act.logits, act.ln_f, weights.wte, NULL, B, T, C, V);
+    softmax_forward_blas(act.probs, act.logits, B, T, V);
 }
 
 int main(){
     srand(time(NULL));
+
+    double bstart, bend;
+    bstart = omp_get_wtime();
 
     Tokenizer tokenizer;
     tokenizer_init(&tokenizer, "dictionary.bin");
@@ -294,22 +301,24 @@ int main(){
     int B = 1;
     fill_act_sizes(model.act_sizes, model.config, B);
     alloc_activations(&model.act, model.act_sizes);
-    int max_tokens = 1;
+    int max_tokens = 4;
     int* inputs = (int*)mallocCheck((T+max_tokens)  * sizeof(int));
     for(int i = 0;i<T;i++){
         inputs[i] = 1;
     }
 
-    clock_t start, end;
-    start = clock();
-    gpt_forward(&model, inputs, B);
+    bend = omp_get_wtime();
+    double bcpu_time_used = bend - bstart;
+    printf("Build time: %f seconds\n", bcpu_time_used);
 
+    double start, end;
+    start = omp_get_wtime();
 
     for(int i = 0;i<max_tokens;i++){
         gpt_forward(&model, inputs, B);
         float* probs = model.act.probs + (T-1) * V;
         int max_ind = 0;
-        float max_val = 1e-5f;
+        float max_val = -1.0f;
         for(int j = 0;j<V;j++){
             if(probs[j] > max_val){
                 max_val = probs[j];
@@ -322,9 +331,11 @@ int main(){
         inputs = inputs + 1;
     }
     printf("\n");
-    end = clock();
-    double cpu_time_used = ((double) (end - start)) / CLOCKS_PER_SEC;
-    printf("CPU time used: %f seconds\n", cpu_time_used);
+
+    end = omp_get_wtime();
+    double cpu_time_used = end - start;
+    printf("Inference time: %f seconds\n", cpu_time_used);
+    
     float tok_per_sec = (float)max_tokens / cpu_time_used;
     printf("Tokens per second: %f\n", tok_per_sec);
 

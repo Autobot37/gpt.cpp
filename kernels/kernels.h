@@ -82,6 +82,26 @@ void matmul_forward(float* out, float* inp, float* weight, float* bias, int B, i
         }
     }
 }
+void matmul_forward_blas(float* out, float* inp, float* weight, float* bias, int B, int T, int C, int OC) {
+    // Compute the dimensions of the matrices
+    int M = B * T; // Number of rows in the output matrix
+    int N = OC;    // Number of columns in the second matrix (weight)
+
+    // Allocate memory for the output matrix
+    float* result = new float[M * N];
+
+    // Perform matrix multiplication
+    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, M, N, C, 1.0f, inp, C, weight, N, 0.0f, result, N);
+
+    // Copy the result to the output matrix with bias
+    for (int i = 0; i < M * N; ++i) {
+        float val = bias ? result[i] + bias[i % OC] : result[i];
+        out[i] = val;
+    }
+
+    // Free the memory allocated for the result matrix
+    delete[] result;
+}
 //-------------------------------------------
 
 void residual_forward(float* out, float* inp, float* skip, int dim){
@@ -154,6 +174,42 @@ void attention_forward(float* out, float* preatt, float* att, float* qkv, int B,
     }
 } 
 
+void attention_forward_blas(float* out, float* preatt, float* att, float* qkv, int B, int T, int C, int NH) {
+    int hs = C / NH;
+    float scale = 1.0 / sqrtf(hs);
+
+    #pragma omp parallel for collapse(3) schedule(dynamic)
+    for (int b = 0; b < B; b++) {
+        for (int t = 0; t < T; t++) {
+            for (int h = 0; h < NH; h++) {
+                // Compute the index offsets
+                int qkv_offset = b * T * 3 * C + t * 3 * C + h * hs;
+                int preatt_offset = b * NH * T * T + h * T * T + t * T;
+                int att_offset = b * NH * T * T + h * T * T + t * T;
+                int out_offset = b * T * C + t * C + h * hs;
+
+                // Compute q @ k
+                cblas_sgemv(CblasRowMajor, CblasNoTrans, T, hs, scale, qkv + qkv_offset, C, qkv + qkv_offset + C, 1, 0.0f, preatt + preatt_offset, 1);
+
+                // Compute softmax
+                float maxval = -FLT_MAX;
+                float sum = 0.0f;
+                for (int t2 = 0; t2 <= t; t2++) {
+                    maxval = fmaxf(maxval, preatt[preatt_offset + t2]);
+                    att[att_offset + t2] = expf(preatt[preatt_offset + t2] - maxval);
+                    sum += att[att_offset + t2];
+                }
+                float expinv = (sum == 0.0f) ? 0.0f : 1.0f / sum;
+                cblas_sscal(T, expinv, att + att_offset, 1);
+
+                // Accumulate
+                cblas_sgemv(CblasRowMajor, CblasTrans, T, hs, 1.0f, qkv + qkv_offset + 2 * C, C, att + att_offset, 1, 0.0f, out + out_offset, 1);
+            }
+        }
+    }
+}
+
+
 //---------------------------------------------
 void gelu_forward(float* out, float* inp, int dim){
     for(int i = 0;i<dim;i++){
@@ -186,6 +242,32 @@ void softmax_forward(float* out, float* inp, int B, int T, int V){
     }
 }
 
+void softmax_forward_blas(float* out, float* inp, int B, int T, int V) {
+    for (int b = 0; b < B; b++) {
+        for (int t = 0; t < T; t++) {
+            float* inp_p = inp + b * T * V + t * V;
+            float* out_p = out + b * T * V + t * V;
+
+            // Find max value
+            float max_val = -FLT_MAX;
+            for (int i = 0; i < V; i++) {
+                if (inp_p[i] > max_val) {
+                    max_val = inp_p[i];
+                }
+            }
+
+            // Compute softmax
+            float sum = 0.0f;
+            for (int i = 0; i < V; i++) {
+                out_p[i] = expf(inp_p[i] - max_val);
+                sum += out_p[i];
+            }
+
+            // Normalize
+            cblas_sscal(V, 1.0f / sum, out_p, 1);
+        }
+    }
+}
 //-------------------------------------------
 void crossentropy_forward(float* losses, float* probs, int * target, int B, int T, int V){
     for(int b = 0;b<B;b++){

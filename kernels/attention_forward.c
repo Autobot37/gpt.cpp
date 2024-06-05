@@ -2,6 +2,9 @@
 #include <stdlib.h>
 #include <time.h>
 #include <math.h>
+#include <cblas.h>
+#include <cblas-openblas.h>
+#include <cfloat>
 
 void attention_forward(float* out, float* preatt, float* att, float* qkv, int B, int T, int C, int NH){
     int hs = C/NH;
@@ -66,6 +69,42 @@ void attention_forward(float* out, float* preatt, float* att, float* qkv, int B,
     }
 } 
 
+void attention_forward_blas(float* out, float* preatt, float* att, float* qkv, int B, int T, int C, int NH) {
+    int hs = C / NH;
+    float scale = 1.0 / sqrtf(hs);
+
+    #pragma omp parallel for collapse(3) schedule(dynamic)
+    for (int b = 0; b < B; b++) {
+        for (int t = 0; t < T; t++) {
+            for (int h = 0; h < NH; h++) {
+                // Compute the index offsets
+                int qkv_offset = b * T * 3 * C + t * 3 * C + h * hs;
+                int preatt_offset = b * NH * T * T + h * T * T + t * T;
+                int att_offset = b * NH * T * T + h * T * T + t * T;
+                int out_offset = b * T * C + t * C + h * hs;
+
+                // Compute q @ k
+                cblas_sgemv(CblasRowMajor, CblasNoTrans, T, hs, scale, qkv + qkv_offset, C, qkv + qkv_offset + C, 1, 0.0f, preatt + preatt_offset, 1);
+
+                // Compute softmax
+                float maxval = -FLT_MAX;
+                float sum = 0.0f;
+                for (int t2 = 0; t2 <= t; t2++) {
+                    maxval = fmaxf(maxval, preatt[preatt_offset + t2]);
+                    att[att_offset + t2] = expf(preatt[preatt_offset + t2] - maxval);
+                    sum += att[att_offset + t2];
+                }
+                float expinv = (sum == 0.0f) ? 0.0f : 1.0f / sum;
+                cblas_sscal(T, expinv, att + att_offset, 1);
+
+                // Accumulate
+                cblas_sgemv(CblasRowMajor, CblasTrans, T, hs, 1.0f, qkv + qkv_offset + 2 * C, C, att + att_offset, 1, 0.0f, out + out_offset, 1);
+            }
+        }
+    }
+}
+
+
 int main(){
 
     int mul = 4;
@@ -81,14 +120,10 @@ int main(){
     qkv = (float*)malloc(B*T*3*C*sizeof(float));
     out = (float*)malloc(B*T*C*sizeof(float));
 
-    srand(time(NULL));
-    clock_t start, end;
-    double cpu_time_used;
-    start = clock();
+   
     attention_forward(out, preatt, att, qkv, B, T, C, NH);
-    end = clock();
-    cpu_time_used = ((double) (end - start)) / CLOCKS_PER_SEC;
-    printf("Time: %f\n", cpu_time_used);
 
+    attention_forward_blas(out, preatt, att, qkv, B,T,C,NH);
+     
     return 0;
 }

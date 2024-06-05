@@ -3,16 +3,11 @@
 #include <omp.h>
 #include <x86intrin.h>
 #include <string.h>
-
-typedef int vec __attribute__ ((vector_size (32)));
+#include "mkl.h"
+#include <sys/time.h> 
 
 #define min(a,b) ((a) < (b) ? (a) : (b))
 
-vec* alloc(int n){
-    vec* ptr = (vec*)aligned_alloc(32, n*sizeof(vec));
-    memset(ptr, 0, n*sizeof(vec));
-    return ptr;
-}
 //inp(B,T,C) @  weight(3*C, C).T -> out(B,T,3*C)
 void matmul_forward(float* out, float* inp, float* weight, float* bias, int B, int T, int C, int OC){
     #pragma omp parallel for collapse(2) schedule(static)    
@@ -33,49 +28,23 @@ void matmul_forward(float* out, float* inp, float* weight, float* bias, int B, i
     }
 }
 
-void matmul_simd(float* out, float* _a, float* _b, int N){
-    
-    int nB = (N+8)/8;
-    vec* a = alloc(N*nB);
-    vec* b = alloc(N*nB);
+// Function to perform matrix multiplication using MKL
+void matmul_forward_blas(float* out, float* inp, float* weight, float* bias, int B, int T, int C, int OC) {
+    int M = B * T;
+    int N = OC;
+    int K = C;
+    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, M, N, K, 1.0f, inp, K, weight, N, 0.0f, out, N);
 
-    for(int i = 0;i<N;i++){
-        for(int j = 0;j<N;j++){
-            a[i*nB + j/8][j%8] = _a[i*N + j];
-            b[i*nB + j/8][j%8] = _b[j*N + i];
-        }
-    }
-    for(int i = 0;i<N;i++){
-        for(int j = 0;j<N;j++){
-            vec s = {};
-
-            for(int k = 0;k<nB;k++){
-                s += a[i*nB+k] * b[j*nB+k];
-            }
-            for(int k = 0;k<8;k++){
-                out[i*N+j] += s[k];
+    if (bias) {
+        #pragma omp parallel for
+        for (int i = 0; i < M; ++i) {
+            for (int j = 0; j < N; ++j) {
+                out[i * N + j] += bias[j];
             }
         }
     }
 }
 
-void matmul_normal(float* __restrict__ out, float* a, float* _b, int N){
-    float* b = (float*)malloc(N*N*sizeof(float));
-    for(int i=0;i<N;i++){
-        for(int j = 0;j<N;j++){
-            b[i*N+j] = _b[j*N+i];
-        }
-    }
-    for(int i = 0;i<N;i++){
-        for(int j = 0;j<N;j++){
-            float val = 0.0f;
-            for(int k = 0;k<N;k++){
-                val += a[i*N+k] * b[j*N+k];
-            }
-            out[i*N+j] = val;
-        }
-    }
-}
 
 void rand_init(float* arr, int size){
     for(int i = 0;i<size;i++){
@@ -83,14 +52,12 @@ void rand_init(float* arr, int size){
     }
 }
 
-
 int main(){
 
-    int mul = 4;
-    int B = 4*mul;
-    int T = 128*mul;
-    int C = 128*mul;
-    int OC = 128*2*mul;
+    int B = 32;
+    int T = 1024;
+    int C = 768;
+    int OC = 3*C;
 
     float *inp, *weight, *bias, *out;
     inp = (float*)malloc(B*T*C*sizeof(float));
@@ -101,19 +68,24 @@ int main(){
     rand_init(weight, OC*C);
     rand_init(bias, OC);
 
-    matmul_forward(out, inp, weight, bias, B, T, C, OC);
-    //normal
-    int N = 1920;
-    float *a, *b, *c;
-    a = (float*)malloc(N*N*sizeof(float));
-    b = (float*)malloc(N*N*sizeof(float));
-    c = (float*)malloc(N*N*sizeof(float));
-    matmul_normal(c, a, b, N);
-    //SIMD
-    matmul_simd(c, a, b, N);    
-    //blocked
-    matmul_kernel(c, a, b, N);
-    
+    struct timeval start, end;
 
-    return 0;
+    gettimeofday(&start, NULL);
+    for (int i = 0; i < 4; i++) {
+        matmul_forward(out, inp, weight, bias, B, T, C, OC);
+    }
+    gettimeofday(&end, NULL);
+    double custom_duration = ((end.tv_sec - start.tv_sec) * 1000000u + end.tv_usec - start.tv_usec) / 1.e6;
+
+    gettimeofday(&start, NULL);
+    for (int i = 0; i < 4; i++) {
+        matmul_forward_blas(out, inp, weight, bias, B, T, C, OC);
+    }
+    gettimeofday(&end, NULL);
+    double blas_duration = ((end.tv_sec - start.tv_sec) * 1000000u + end.tv_usec - start.tv_usec) / 1.e6;
+
+    printf("Custom implementation duration: %.6f seconds\n", custom_duration);
+    printf("OpenBLAS implementation duration: %.6f seconds\n", blas_duration);
+    
+   return 0;
 }

@@ -109,7 +109,7 @@ void matmul_forward2(float* d_out,
     cublasCreate(&cublas_handle);
     const float alpha = 1.0f;
     const float beta = 0.0f;
-    cublasSgemm(cublas_handle, CUBLAS_OP_T, CUBLAS_OP_N, OC, B * T, C,
+    cublasSgemm_v2(cublas_handle, CUBLAS_OP_T, CUBLAS_OP_N, OC, B * T, C,
                              &alpha, d_weight, C, d_inp, C, &beta, d_out, OC);
     if (d_bias != nullptr) {
         int block_size = sqrt_block_size * sqrt_block_size;
