@@ -1,9 +1,9 @@
-CPU_SRC ?= gpt2.c
-CUDA_SRC ?= gpt2.cu
+CPU_SRC ?= model.c
+CUDA_SRC ?= model.cu
 
 CC = g++
 CFLAGS = -march=native -ffast-math -O3 
-LDFLAGS = -lm -lopenblas -fopenmp -lmkl_intel_lp64 -lmkl_sequential -lmkl_core -lpthread
+LDFLAGS = -lm -lopenblas -fopenmp
 
 NVCCFLAGS = -O3 --use_fast_math -Xcompiler -fopenmp
 CUDA_LDFLAGS = -lcublas --expt-relaxed-constexpr

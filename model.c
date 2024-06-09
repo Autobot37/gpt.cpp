@@ -268,6 +268,38 @@ void swiglu(float* hb, float* hb2, int dim){
     }
 }
 
+void attention(float* _att, float* _q, float* _key_cache, float* _value_cache, float* _xb, int pos, int dim, int head_size, int kv_dim, int kv_mul, int n_heads, int seq_len, int n_kv_heads, int n_embd, int L){
+    int skip = L * seq_len * kv_dim;
+    for(int h =0;h < n_heads; h++){
+
+        float* q = _q + h*head_size;
+        float* att = _att + h* seq_len;
+        
+        for(int t= 0;t<=pos;t++){
+            float* k = _key_cache + skip + t*kv_dim + (h/kv_mul)*head_size;
+
+            float score = 0.0f;
+            for(int j = 0;j<head_size;j++){
+                score += q[j]*k[j];
+            }
+            score /= sqrtf(head_size);
+            att[t] = score;
+        }
+
+        softmax(att, pos + 1);
+
+        float* xb = _xb + h*head_size;
+        memset(xb, 0, head_size*sizeof(float));
+        for(int t = 0;t<=pos;t++){
+            float* v = _value_cache + skip + t*kv_dim + (h/kv_mul)*head_size;
+            float score = att[t];
+            for(int j = 0;j<head_size;j++){
+                xb[j] += score*v[j];
+            }
+        }
+
+    }
+}
 void print(float* x, int size){
     for(int i = 0;i<size;i++){
         printf("%f ", x[i]);
@@ -298,35 +330,8 @@ float* forward(Model* model, int token, int pos){
 
         apply_rotemb(acts->k, acts->q, pos, dim, head_size, kv_dim);
 
-        for(int h =0;h < config->n_heads; h++){
+        attention(acts->att, acts->q, acts->key_cache, acts->value_cache, acts->xb, pos, dim, head_size, kv_dim, kv_mul, config->n_heads, config->seq_len, config->n_kv_heads, config->n_embd, L);
 
-            float* q = acts->q + h*head_size;
-            float* att = acts->att + h* config->seq_len;
-            
-            for(int t= 0;t<=pos;t++){
-                float* k = acts->key_cache + skip + t*kv_dim + (h/kv_mul)*head_size;
-
-                float score = 0.0f;
-                for(int j = 0;j<head_size;j++){
-                    score += q[j]*k[j];
-                }
-                score /= sqrtf(head_size);
-                att[t] = score;
-            }
-
-            softmax(att, pos + 1);
-
-            float* xb = acts->xb + h*head_size;
-            memset(xb, 0, head_size*sizeof(float));
-            for(int t = 0;t<=pos;t++){
-                float* v = acts->value_cache + skip + t*kv_dim + (h/kv_mul)*head_size;
-                float score = att[t];
-                for(int j = 0;j<head_size;j++){
-                    xb[j] += score*v[j];
-                }
-            }
-
-        }
         matmul(acts->xb2, acts->xb, weights->wo + L * dim * dim, dim, dim);
 
         residual(acts->x, acts->xb2, dim);
