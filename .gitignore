@@ -1,2 +1,4 @@
 *.bin
 *.exe
+data/
+dataprepare.py
