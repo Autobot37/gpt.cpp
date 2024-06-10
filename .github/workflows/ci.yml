@@ -29,6 +29,9 @@ jobs:
             - name: Install dependencies
               run: pip install -r requirements.txt
             
+            - name: Download Weights
+              run: wget https://huggingface.co/karpathy/tinyllamas/resolve/main/stories110M.bin
+            
             - name: Compile and run
               run: make run_cpu && ./executable
 

@@ -1,3 +1,7 @@
+#include <cuda_runtime.h>
+#include <math.h>
+#include <stdio.h>
+
 void softmax(float* x, int size){
     float max = x[0];
     for(int i = 1;i<size;i++){
