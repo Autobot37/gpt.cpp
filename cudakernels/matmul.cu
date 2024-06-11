@@ -1,9 +1,12 @@
-void matmul(float* out, float* x, float* w, int n, int d){
-    for(int i = 0;i<d;i++){
-        float val = 0.0f;
-        for(int j = 0;j<n;j++){
-            val += x[j]*w[i*n+j];
+void matmul(float* out, float* in, float* w, float* b, int N ,int D){
+    //in is D, w is N,D, b is N, out is N
+    int i;
+    #pragma omp parallel for private(i)
+    for(i = 0;i<N;i++){
+        float sum = (b!=NULL) ? b[i] : 0;
+        for(int j = 0;j<D;j++){
+            sum += in[j] * w[i*D + j];
         }
-        out[i] = val;
-    }
+        out[i] = sum;
+    } 
 }

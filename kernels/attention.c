@@ -1,32 +1,45 @@
-void attention(float* _att, float* _q, float* _key_cache, float* _value_cache, float* _xb, int pos, int dim, int head_size, int kv_dim, int kv_mul, int n_heads, int seq_len, int n_kv_heads, int n_embd, int L){
-    int skip = L * seq_len * kv_dim;
-    for(int h =0;h < n_heads; h++){
 
-        float* q = _q + h*head_size;
-        float* att = _att + h* seq_len;
-        
-        for(int t= 0;t<=pos;t++){
-            float* k = _key_cache + skip + t*kv_dim + (h/kv_mul)*head_size;
+void attention(float* out, float* att, float* qkv, float* key_cache, float* value_cache, int l, int pos, int C, int NH, int head_size, int T){
 
-            float score = 0.0f;
-            for(int j = 0;j<head_size;j++){
-                score += q[j]*k[j];
-            }
-            score /= sqrtf(head_size);
-            att[t] = score;
-        }
+    float* q = qkv;
+    memcpy(key_cache + l * C * T + pos * C, qkv + C, C * sizeof(float));
+    memcpy(value_cache + l * C * T + pos * C, qkv + 2*C, C * sizeof(float));
 
-        softmax(att, pos + 1);
+    float scale = 1.0 / sqrt(head_size);
 
-        float* xb = _xb + h*head_size;
-        memset(xb, 0, head_size*sizeof(float));
+    float* k = key_cache + l * C * T;
+    float* v = value_cache + l * C * T;
+
+    int h;
+    #pragma omp parallel for private(h)
+    for(h = 0;h<NH;h++){
+
+        float* qh = q + h * head_size;
+        float* atth = att + h * T;
+
         for(int t = 0;t<=pos;t++){
-            float* v = _value_cache + skip + t*kv_dim + (h/kv_mul)*head_size;
-            float score = att[t];
-            for(int j = 0;j<head_size;j++){
-                xb[j] += score*v[j];
+            float* kh = k + t * C + h * head_size;
+            float score = 0.0f;
+            for(int i = 0;i<head_size;i++){
+                score += qh[i] * kh[i];
             }
+            score *= scale;
+            atth[t] = score;
+        }
+        for(int t=pos+1;t<T;t++){
+            atth[t] = -INFINITY;
         }
 
+        softmax(atth, T);
+
+        float* outh = out + h * head_size;
+        memset(outh, 0, head_size * sizeof(float));
+        for(int t = 0;t<=pos;t++){
+            float* vh = v + t * C + h * head_size;
+            float score = atth[t];
+            for(int i = 0;i<head_size;i++){
+                outh[i] += score * vh[i];
+            }
+        }
     }
 }

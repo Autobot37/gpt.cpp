@@ -1,5 +1,5 @@
-void encoder(float* out, float* wte, int token,int n_embd){
-    for(int j = 0;j<n_embd;j++){
-        out[j] = wte[token*n_embd+j];
+void embed(float* x, float* wte, float* wpe, int token, int pos, int C){
+    for(int i = 0;i<C;i++){
+        x[i] = wte[token*C + i] + wpe[pos*C + i];
     }
 }

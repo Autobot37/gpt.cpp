@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <time.h>
 #include "tokenizer.h"
 
 void rand_init(float* x, int N){
@@ -240,7 +241,9 @@ void layernorm(float* out, float* x, float* w, float* b, int C){
 
 void matmul(float* out, float* in, float* w, float* b, int N ,int D){
     //in is D, w is N,D, b is N, out is N
-    for(int i = 0;i<N;i++){
+    int i;
+    #pragma omp parallel for private(i)
+    for(i = 0;i<N;i++){
         float sum = (b!=NULL) ? b[i] : 0;
         for(int j = 0;j<D;j++){
             sum += in[j] * w[i*D + j];
@@ -289,7 +292,9 @@ void attention(float* out, float* att, float* qkv, float* key_cache, float* valu
     float* k = key_cache + l * C * T;
     float* v = value_cache + l * C * T;
 
-    for(int h = 0;h<NH;h++){
+    int h;
+    #pragma omp parallel for private(h)
+    for(h = 0;h<NH;h++){
 
         float* qh = q + h * head_size;
         float* atth = att + h * T;
@@ -359,6 +364,9 @@ void generate(Model* model, Tokenizer* tokenizer, int max_tokens){
     int token = 50256;
     int pos = 0;
 
+    clock_t start, end;
+    start = clock();
+
     for(int i = 0;i<max_tokens;i++){
         float* logits = forward(model, token, pos);
         softmax(logits, model->config.vocab_size);
@@ -370,11 +378,18 @@ void generate(Model* model, Tokenizer* tokenizer, int max_tokens){
                 next = i;
             }
         }
-        char* piece = tokenizer_decode(tokenizer, next);
-        safe_printf(piece);
+        const char* piece = tokenizer_decode(tokenizer, next);
+        // safe_printf(piece);
+        printf("%d ", next);
+        fflush(stdout);
         token = next;
         pos++;
     }
+    printf("\n");
+    end = clock();
+    double time_taken = ((double)end - start) / CLOCKS_PER_SEC;
+    double one_token = (time_taken / max_tokens) * 1000;
+    printf("One token took %.6f ms\n", one_token);
 }
 
 int main(){
@@ -387,7 +402,7 @@ int main(){
     Tokenizer tokenizer;
     tokenizer_init(&tokenizer, "tokenizer.bin");
 
-    forward(&model, tokenizer, 32);
+    generate(&model, &tokenizer, 32);
   
     return 0;
 
