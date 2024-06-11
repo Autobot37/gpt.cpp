@@ -1,5 +1,6 @@
 #include <cuda_runtime.h>
 #include <iostream>
+#include <cublas_v2.h>
 using namespace std;
 
 void matmul(float* out, float* in, float* w, float* b, int N ,int D){
@@ -31,6 +32,33 @@ void matmul_gpu(float* out, float* in, float* w, float* b, int N ,int D){
     int num_threads = 1024;
     int num_blocks = (N + num_threads - 1) / num_threads;
     matmul_kernel<<<num_blocks, num_threads>>>(out, in, w, b, N, D);
+}
+
+__global__ void add_bias(float* out, float* b, int N){
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if(i < N){
+        out[i] += b[i];
+    }
+}
+
+void gemm(float* out, float* in, float* w, float* b, int N, int D) {
+    cublasHandle_t handle;
+    cublasCreate(&handle);
+
+    float alpha = 1.0;
+    int lda = D;
+    int incx = 1;
+    float beta = 0.0;
+    int incy = 1;
+
+    cublasStatus_t status =  cublasSgemv(handle, CUBLAS_OP_T, D, N, &alpha, w, lda, in, incx, &beta, out, incy);
+    if (status != CUBLAS_STATUS_SUCCESS) {
+        printf("cublasSgemv failed\n");
+    }
+    if(b != NULL)
+    add_bias<<<(N + 1023) / 1024, 1024>>>(out, b, N);
+
+    cublasDestroy(handle);
 }
 
 void rand_init(float* arr, int N){
@@ -84,6 +112,16 @@ int main(){
     cudaMemcpy(out_gpu, d_out, N * sizeof(float), cudaMemcpyDeviceToHost);
 
     isequal(out, out_gpu, N);
+
+    //----sgemm
+    float* out_gemm;
+    cudaMalloc(&out_gemm, N * sizeof(float));
+    gemm(out_gemm, d_in, d_w, d_b, N, D);
+
+    float* out_gemm_cpu = (float*)malloc(N * sizeof(float));
+    cudaMemcpy(out_gemm_cpu, out_gemm, N * sizeof(float), cudaMemcpyDeviceToHost);
+
+    isequal(out, out_gemm_cpu, N);
 
     return 0;
 }

@@ -34,6 +34,15 @@ jobs:
             
             - name: Compile and run
               run: make run_cpu && ./executable
-
-
-
+    
+    build-cuda-fp32:
+      runs-on: ubuntu-latest
+      container:
+        image: nvidia/cuda:12.4.1-devel-ubuntu22.04
+  
+      steps:
+        - name: Checkout code
+          uses: actions/checkout@v4
+  
+        - name: Build FP32 checkpoint
+          run: make run_cuda && ./executable

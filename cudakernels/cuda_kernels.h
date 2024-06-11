@@ -65,24 +65,32 @@ void layernorm_gpu(float* out, float* x, float* w, float* b, int C){
 }
 //-----------------------------------------------------------------------------------------------
 
-__global__
-void matmul_kernel(float* out, float* in, float* w, float* b, int N ,int D){
+__global__ void add_bias(float* out, float* b, int N){
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if(i < N){
-        float sum = (b!=NULL) ? b[i] : 0;
-        for(int j = 0;j<D;j++){
-            sum += in[j] * w[i*D + j];
-        }
-        out[i] = sum;
+        out[i] += b[i];
     }
 }
 
-void matmul_gpu(float* out, float* in, float* w, float* b, int N ,int D){
-    int num_threads = 1024;
-    int num_blocks = (N + num_threads - 1) / num_threads;
-    matmul_kernel<<<num_blocks, num_threads>>>(out, in, w, b, N, D);
-}
+void gemm(float* out, float* in, float* w, float* b, int N, int D) {
+    cublasHandle_t handle;
+    cublasCreate(&handle);
 
+    float alpha = 1.0;
+    int lda = D;
+    int incx = 1;
+    float beta = 0.0;
+    int incy = 1;
+
+    cublasStatus_t status =  cublasSgemv(handle, CUBLAS_OP_T, D, N, &alpha, w, lda, in, incx, &beta, out, incy);
+    if (status != CUBLAS_STATUS_SUCCESS) {
+        printf("cublasSgemv failed\n");
+    }
+    if(b != NULL)
+    add_bias<<<(N + 1023) / 1024, 1024>>>(out, b, N);
+
+    cublasDestroy(handle);
+}
 //-----------------------------------------------------------------------------------------------
 __global__ void residual_kernel(float* out, float* in, int C){
     int i = blockIdx.x * blockDim.x + threadIdx.x;

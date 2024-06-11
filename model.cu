@@ -3,6 +3,7 @@
 #include <string.h>
 #include <math.h>
 #include <time.h>
+#include <cublas_v2.h>
 #include "tokenizer.h"
 #include "cudakernels/cuda_kernels.h"
 
@@ -254,18 +255,18 @@ float* forward(Model* model, int token, int pos){
     for(int l=0;l<L;l++){
 
         layernorm_gpu(a->residual1, a->x, w->ln_1_w + l*C, w->ln_1_b + l*C, C);
-        matmul_gpu(a->qkv, a->residual1, w->c_attn_w + l*3*C*C, w->c_attn_b + l*3*C, 3*C, C);
+        gemm(a->qkv, a->residual1, w->c_attn_w + l*3*C*C, w->c_attn_b + l*3*C, 3*C, C);
         attention_gpu(a->atty, a->att, a->qkv, a->key_cache, a->value_cache, l, pos, C, NH, head_size, T);
-        matmul_gpu(a->attproj, a->atty, w->c_proj_w + l*C*C, w->c_proj_b + l*C, C, C);
+        gemm(a->attproj, a->atty, w->c_proj_w + l*C*C, w->c_proj_b + l*C, C, C);
         residual_gpu(a->x, a->attproj, C);
         layernorm_gpu(a->residual2, a->x, w->ln_2_w + l*C, w->ln_2_b + l*C, C);
-        matmul_gpu(a->c_fc, a->residual2, w->mlp_c_fc_w + l*4*C*C, w->mlp_c_fc_b + l*4*C, 4*C, C);
+        gemm(a->c_fc, a->residual2, w->mlp_c_fc_w + l*4*C*C, w->mlp_c_fc_b + l*4*C, 4*C, C);
         gelu_gpu(a->c_fc, 4*C);
-        matmul_gpu(a->residual2, a->c_fc, w->mlp_c_proj_w + l*C*4*C, w->mlp_c_proj_b + l*C, C, 4*C);
+        gemm(a->residual2, a->c_fc, w->mlp_c_proj_w + l*C*4*C, w->mlp_c_proj_b + l*C, C, 4*C);
         residual_gpu(a->x, a->residual2, C);
     }
     layernorm_gpu(a->x, a->x, w->ln_f_w, w->ln_f_b, C);
-    matmul_gpu(a->logits, a->x, w->wte, NULL, V, C);
+    gemm(a->logits, a->x, w->wte, NULL, V, C);
     return a->logits;
 }
 
