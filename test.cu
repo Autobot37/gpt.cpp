@@ -1,43 +1,37 @@
 #include <cuda_runtime.h>
 #include <iostream>
+#include <cublas_v2.h>
 using namespace std;
 
-__global__
-void add_kernel(float* out, float* in, int n) {
-    int index = blockIdx.x * blockDim.x + threadIdx.x;
-    if (index < n) {
-        out[index] = in[index] + 1;
-    }
-}
+cublasHandle_t handle;
 
-void add(float* out, float* in, int n) {
-    int threads = 256;
-    int blocks = (n + threads - 1) / threads;
-    add_kernel<<<blocks, threads>>>(out, in, n);
+void gemm(float* out, float* in, float* w, float* b, int N, int D) {
+    float alpha = 1.0;
+    int lda = D;
+    int incx = 1;
+    float beta = 0.0;
+    int incy = 1;
+
+    cublasStatus_t status =  cublasSgemv(handle, CUBLAS_OP_T, D, N, &alpha, w, lda, in, incx, &beta, out, incy);
+    if (status != CUBLAS_STATUS_SUCCESS) {
+        printf("cublasSgemv failed\n");
+    }
 }
 
 int main(){
 
-    int n = 8;
-    float* arr = (float*)malloc(n * sizeof(float));
+    cublasCreate(&handle);
+    int N = 4096;
+    int D = 4096;
+    float *in, *w, *out, *b;
+    cudaMalloc(&in, N * D * sizeof(float));
+    cudaMalloc(&w, D * N * sizeof(float));
+    cudaMalloc(&out, N * sizeof(float));
+    cudaMalloc(&b, N * sizeof(float));
 
-    float* in,*out;
-    cudaMalloc((void**)&in, n * sizeof(float));
-    cudaMalloc((void**)&out, n * sizeof(float));
+    gemm(out, in, w, b, N, D);
 
-    for (int i = 0; i < n; i++) {
-        arr[i] = i;
-    }
-    cudaMemcpy(in, arr, n * sizeof(float), cudaMemcpyHostToDevice);
-
-    add(out, in, n);
-
-    cudaMemcpy(arr, out, n * sizeof(float), cudaMemcpyDeviceToHost);
-
-    for (int i = 0; i < n; i++) {
-        cout << arr[i] << " ";
-    }
-    cout << endl;
+    cublasDestroy(handle);
 
     return 0;
 }

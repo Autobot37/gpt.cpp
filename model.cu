@@ -313,6 +313,8 @@ void generate(Model* model, Tokenizer* tokenizer, int max_tokens){
 
 int main(){
 
+    cublasCreate(&handle);
+
     Model model;
     create_model(&model, "params.bin");
 \
@@ -324,6 +326,8 @@ int main(){
     float* logits = forward(&model, 50256, 0);
 
     generate(&model, &tokenizer, 32);
+
+    cublasDestroy(handle);
   
     return 0;
 

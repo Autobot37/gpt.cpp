@@ -252,7 +252,7 @@ import tiktoken
 enc = tiktoken.get_encoding("gpt2")
 write_tokenizer(enc, "tokenizer.bin")
 
-model = GPT.from_pretrained('gpt2')
+model = GPT.from_pretrained('gpt2-medium')
 print(Config)
 # model = GPT(Config)
 logits, _ = model(torch.tensor([[3737]]))

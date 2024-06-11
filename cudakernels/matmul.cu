@@ -3,6 +3,8 @@
 #include <cublas_v2.h>
 using namespace std;
 
+cublasHandle_t handle;
+
 void matmul(float* out, float* in, float* w, float* b, int N ,int D){
     //in is D, w is N,D, b is N, out is N
     int i;
@@ -42,8 +44,6 @@ __global__ void add_bias(float* out, float* b, int N){
 }
 
 void gemm(float* out, float* in, float* w, float* b, int N, int D) {
-    cublasHandle_t handle;
-    cublasCreate(&handle);
 
     float alpha = 1.0;
     int lda = D;
@@ -58,7 +58,6 @@ void gemm(float* out, float* in, float* w, float* b, int N, int D) {
     if(b != NULL)
     add_bias<<<(N + 1023) / 1024, 1024>>>(out, b, N);
 
-    cublasDestroy(handle);
 }
 
 void rand_init(float* arr, int N){
@@ -81,6 +80,8 @@ void isequal(float* a, float* b, int n){
 }
 
 int main(){
+
+    cublasCreate(&handle);
 
     int N = 1024;
     int D = 2048;
@@ -122,6 +123,9 @@ int main(){
     cudaMemcpy(out_gemm_cpu, out_gemm, N * sizeof(float), cudaMemcpyDeviceToHost);
 
     isequal(out, out_gemm_cpu, N);
+
+    cublasDestroy(handle);
+
 
     return 0;
 }

@@ -1,3 +1,6 @@
+cublasHandle_t handle;
+
+
 __global__
 void embed_kernel(float* x, float* wte, float* wpe, int token, int pos, int C){
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -71,10 +74,7 @@ __global__ void add_bias(float* out, float* b, int N){
         out[i] += b[i];
     }
 }
-
 void gemm(float* out, float* in, float* w, float* b, int N, int D) {
-    cublasHandle_t handle;
-    cublasCreate(&handle);
 
     float alpha = 1.0;
     int lda = D;
@@ -88,8 +88,6 @@ void gemm(float* out, float* in, float* w, float* b, int N, int D) {
     }
     if(b != NULL)
     add_bias<<<(N + 1023) / 1024, 1024>>>(out, b, N);
-
-    cublasDestroy(handle);
 }
 //-----------------------------------------------------------------------------------------------
 __global__ void residual_kernel(float* out, float* in, int C){
