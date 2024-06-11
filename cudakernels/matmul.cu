@@ -1,3 +1,7 @@
+#include <cuda_runtime.h>
+#include <iostream>
+using namespace std;
+
 void matmul(float* out, float* in, float* w, float* b, int N ,int D){
     //in is D, w is N,D, b is N, out is N
     int i;
@@ -27,4 +31,59 @@ void matmul_gpu(float* out, float* in, float* w, float* b, int N ,int D){
     int num_threads = 1024;
     int num_blocks = (N + num_threads - 1) / num_threads;
     matmul_kernel<<<num_blocks, num_threads>>>(out, in, w, b, N, D);
+}
+
+void rand_init(float* arr, int N){
+    for(int i = 0;i<N;i++){
+        arr[i] = (float)rand() / RAND_MAX;
+    }
+}
+
+void isequal(float* a, float* b, int n){
+    float maxval = -INFINITY;
+    for(int i = 0;i<n;i++){
+        maxval = fmaxf(maxval, fmaxf(a[i], b[i]));
+    }
+    float eps = 1e-5;
+    for(int i = 0;i<n;i++){
+        if(fabs(a[i] - b[i]) > eps * (maxval + 1)){
+            cout << "Mismatch at index " << i << " CPU: " << a[i] << " GPU: " << b[i] << endl;
+        }
+    }
+}
+
+int main(){
+
+    int N = 1024;
+    int D = 2048;
+
+    float* in = (float*)malloc(D * sizeof(float));
+    float* w = (float*)malloc(N * D * sizeof(float));
+    float* b = (float*)malloc(N * sizeof(float));
+    float* out = (float*)malloc(N * sizeof(float));
+
+    rand_init(in, D);
+    rand_init(w, N * D);
+    rand_init(b, N);
+
+    float* d_in, *d_w, *d_b, *d_out;
+    cudaMalloc(&d_in, D * sizeof(float));
+    cudaMalloc(&d_w, N * D * sizeof(float));
+    cudaMalloc(&d_b, N * sizeof(float));
+    cudaMalloc(&d_out, N * sizeof(float));
+
+    cudaMemcpy(d_in, in, D * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_w, w, N * D * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_b, b, N * sizeof(float), cudaMemcpyHostToDevice);
+
+    matmul(out, in, w, b, N, D);
+
+    matmul_gpu(d_out, d_in, d_w, d_b, N, D);
+
+    float* out_gpu = (float*)malloc(N * sizeof(float));
+    cudaMemcpy(out_gpu, d_out, N * sizeof(float), cudaMemcpyDeviceToHost);
+
+    isequal(out, out_gpu, N);
+
+    return 0;
 }

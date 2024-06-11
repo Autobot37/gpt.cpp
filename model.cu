@@ -12,6 +12,20 @@ void rand_init(float* x, int N){
     }
 }
 
+void printCuda(float* d_array, int size) {
+    float* h_array = (float*)malloc(size * sizeof(float));
+    if (h_array == NULL) {
+        printf("Error allocating memory\n");
+        return;
+    }
+    cudaMemcpy(h_array, d_array, size * sizeof(float), cudaMemcpyDeviceToHost);
+    for (int i = 0; i < size; ++i) {
+        printf("%.4f ", h_array[i]);
+    }
+    printf("\n");
+    free(h_array);
+}
+
 void print(float* x, int N){
     for(int i = 0;i<N;i++){
         printf("%.4f ", x[i]);
@@ -221,47 +235,37 @@ void create_model(Model* model, const char* path){
     fclose(model_file);
 }
 
-float* forward(Model* model, int _token, int _pos){
+float* forward(Model* model, int token, int pos){
 
     Config* c = &model->config;
 
-    int _V = c->vocab_size;
-    int _L = c->n_layer;
-    int _C = c->n_embd;
-    int _NH = c->n_head;
-    int _T = c->block_size;
-    int _head_size = _C / _NH;
+    int V = c->vocab_size;
+    int L = c->n_layer;
+    int C = c->n_embd;
+    int NH = c->n_head;
+    int T = c->block_size;
+    int head_size = C / NH;
 
     Weights* w = &model->weights;
     Activations* a = &model->activations;
 
-    int V, L, C, NH, T, head_size, token, pos;
-    cudaMemcpyToSymbol(V, &_V, sizeof(int));
-    cudaMemcpyToSymbol(L, &_L, sizeof(int));
-    cudaMemcpyToSymbol(C, &_C, sizeof(int));
-    cudaMemcpyToSymbol(NH, &_NH, sizeof(int));
-    cudaMemcpyToSymbol(T, &_T, sizeof(int));
-    cudaMemcpyToSymbol(head_size, &_head_size, sizeof(int));
-    cudaMemcpyToSymbol(token, &_token, sizeof(int));
-    cudaMemcpyToSymbol(pos, &_pos, sizeof(int));
-
-    embed(a->x, w->wte, w->wpe, token, pos, C);   
+    embed_gpu(a->x, w->wte, w->wpe, token, pos, C); 
 
     for(int l=0;l<L;l++){
 
-        layernorm(a->residual1, a->x, w->ln_1_w + l*C, w->ln_1_b + l*C, C);
-        matmul(a->qkv, a->residual1, w->c_attn_w + l*3*C*C, w->c_attn_b + l*3*C, 3*C, C);
-        attention(a->atty, a->att, a->qkv, a->key_cache, a->value_cache, l, pos, C, NH, head_size, T);
-        matmul(a->attproj, a->atty, w->c_proj_w + l*C*C, w->c_proj_b + l*C, C, C);
-        residual(a->x, a->attproj, C);
-        layernorm(a->residual2, a->x, w->ln_2_w + l*C, w->ln_2_b + l*C, C);
-        matmul(a->c_fc, a->residual2, w->mlp_c_fc_w + l*4*C*C, w->mlp_c_fc_b + l*4*C, 4*C, C);
-        gelu(a->c_fc, 4*C);
-        matmul(a->residual2, a->c_fc, w->mlp_c_proj_w + l*C*4*C, w->mlp_c_proj_b + l*C, C, 4*C);
-        residual(a->x, a->residual2, C);
+        layernorm_gpu(a->residual1, a->x, w->ln_1_w + l*C, w->ln_1_b + l*C, C);
+        matmul_gpu(a->qkv, a->residual1, w->c_attn_w + l*3*C*C, w->c_attn_b + l*3*C, 3*C, C);
+        attention_gpu(a->atty, a->att, a->qkv, a->key_cache, a->value_cache, l, pos, C, NH, head_size, T);
+        matmul_gpu(a->attproj, a->atty, w->c_proj_w + l*C*C, w->c_proj_b + l*C, C, C);
+        residual_gpu(a->x, a->attproj, C);
+        layernorm_gpu(a->residual2, a->x, w->ln_2_w + l*C, w->ln_2_b + l*C, C);
+        matmul_gpu(a->c_fc, a->residual2, w->mlp_c_fc_w + l*4*C*C, w->mlp_c_fc_b + l*4*C, 4*C, C);
+        gelu_gpu(a->c_fc, 4*C);
+        matmul_gpu(a->residual2, a->c_fc, w->mlp_c_proj_w + l*C*4*C, w->mlp_c_proj_b + l*C, C, 4*C);
+        residual_gpu(a->x, a->residual2, C);
     }
-    layernorm(a->x, a->x, w->ln_f_w, w->ln_f_b, C);
-    matmul(a->logits, a->x, w->wte, NULL, V, C);
+    layernorm_gpu(a->x, a->x, w->ln_f_w, w->ln_f_b, C);
+    matmul_gpu(a->logits, a->x, w->wte, NULL, V, C);
     return a->logits;
 }
 
@@ -271,35 +275,35 @@ void generate(Model* model, Tokenizer* tokenizer, int max_tokens){
     int pos = 0;
 
     float* logits_cpu = (float*)malloc(model->config.vocab_size * sizeof(float));
-    // if(logits_cpu == NULL){
-    //     printf("Error allocating memory\n");
-    //     exit(1);
-    // }
+    if(logits_cpu == NULL){
+        printf("Error allocating memory\n");
+        exit(1);
+    }
 
     clock_t start, end;
     start = clock();
 
     for(int i = 0;i<max_tokens;i++){
         float* logits = forward(model, token, pos);
-        // cudaMemcpy(logits_cpu, model->activations.logits, model->config.vocab_size * sizeof(float), cudaMemcpyDeviceToHost);
-        // softmax(logits_cpu, model->config.vocab_size);
-        // int next = 0;
-        // float max = 0;
-        // for(int i = 0;i<model->config.vocab_size;i++){
-        //     if(logits_cpu[i] > max){
-        //         max = logits[i];
-        //         next = i;
-        //     }
-        // }
-        // const char* piece = tokenizer_decode(tokenizer, next);
-        // // safe_printf(piece);
-        // printf("%d ", next);
-        // fflush(stdout);
-        // token = next;
-        token++;
+        softmax_gpu(logits, model->config.vocab_size);
+        cudaMemcpy(logits_cpu, logits, model->config.vocab_size * sizeof(float), cudaMemcpyDeviceToHost);
+
+        int next = 0;
+        float max = 0;
+        for(int i = 0;i<model->config.vocab_size;i++){
+            if(logits_cpu[i] > max){
+                max = logits_cpu[i];
+                next = i;
+            }
+        }
+        const char* piece = tokenizer_decode(tokenizer, next);
+        printf("%d ", next);
+        fflush(stdout);
+        token = next;
         pos++;
     }
     printf("\n");
+    cudaDeviceSynchronize();
     end = clock();
     double time_taken = ((double)end - start) / CLOCKS_PER_SEC;
     double one_token = (time_taken / max_tokens) * 1000;
@@ -316,7 +320,9 @@ int main(){
     Tokenizer tokenizer;
     tokenizer_init(&tokenizer, "tokenizer.bin");
 
-    generate(&model, &tokenizer, 256);
+    float* logits = forward(&model, 50256, 0);
+
+    generate(&model, &tokenizer, 32);
   
     return 0;
 

@@ -294,6 +294,8 @@ int main(){
     Tokenizer tokenizer;
     tokenizer_init(&tokenizer, "tokenizer.bin");
 
+    float* logits = forward(&model, 50256, 0);
+
     generate(&model, &tokenizer, 32);
   
     return 0;
