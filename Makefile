@@ -18,7 +18,7 @@ run_cpu: $(CPU_SRC)
 
 run_cuda: $(CUDA_SRC)
 	nvcc $(NVCCFLAGS) $(CUDA_SRC) -o $(EXECUTABLE) $(CUDA_LDFLAGS)
-	OMP_NUM_THREADS=8 ./$(EXECUTABLE)
+	./$(EXECUTABLE)
 
 profile_cpu: $(CPU_SRC)
 	$(CC) $(CFLAGS) -pg $(CPU_SRC) -o $(EXECUTABLE) $(LDFLAGS)
@@ -28,7 +28,7 @@ profile_cpu: $(CPU_SRC)
 
 profile_cuda: $(CUDA_SRC)
 	nvcc $(NVCCFLAGS) -pg $(CUDA_SRC) -o $(EXECUTABLE) $(CUDA_LDFLAGS)
-	OMP_NUM_THREADS=8 ./$(EXECUTABLE)
+	./$(EXECUTABLE)
 	gprof $(EXECUTABLE) gmon.out
 	rm $(EXECUTABLE) gmon.out
 

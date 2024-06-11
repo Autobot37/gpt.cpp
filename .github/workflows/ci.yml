@@ -36,6 +36,10 @@ jobs:
               run: make run_cpu && ./executable
     
     build-cuda-fp32:
+      strategy:
+        matrix:
+          os: [ubuntu-latest]
+          python-version: [3.10]
       runs-on: ubuntu-latest
       container:
         image: nvidia/cuda:12.4.1-devel-ubuntu22.04
@@ -43,11 +47,6 @@ jobs:
       steps:
         - name: Checkout code
           uses: actions/checkout@v4
-
-        - name: Install OpenMP
-          run: |
-            sudo apt-get update
-            sudo apt-get install libomp-dev -y
         
         - name: Install dependencies
           run: pip install -r requirements.txt
