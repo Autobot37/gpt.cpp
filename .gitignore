@@ -3,3 +3,4 @@ stories110M.bin
 data/
 dataprepare.py
 .vscode/
+*.bin

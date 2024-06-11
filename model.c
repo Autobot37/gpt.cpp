@@ -2,509 +2,390 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
-#include <fcntl.h>
-#include <sys/mman.h>
-#include <unistd.h>
-#include <time.h>
+#include "tokenizer.h"
 
-typedef struct {
-    int n_embd;
-    int hidden_dim;
-    int n_layers;
-    int n_heads;
-    int n_kv_heads;
+void rand_init(float* x, int N){
+    for(int i = 0;i<N;i++){
+        x[i] = (float)rand() / RAND_MAX;
+    }
+}
+
+void print(float* x, int N){
+    for(int i = 0;i<N;i++){
+        printf("%.4f ", x[i]);
+    }
+    printf("\n");
+    printf("----------------------\n");
+}
+
+typedef struct Config {
+    int block_size;
     int vocab_size;
-    int seq_len;
+    int n_layer;
+    int n_head;
+    int n_embd;
 } Config;
 
-typedef struct {
+typedef struct TransformerWeights {
 
     float* wte;
-    float* rms_attn_weight;
-    float* rms_ffn_weight;
-    float* wq;
-    float* wk;
-    float* wv;
-    float* wo;
-    float* w1;
-    float* w2;
-    float* w3;
-    float* rms_final_weight;
-    float* wcls;
-} Weights;
+    float* wpe;
+    float* ln_1_w;
+    float* ln_1_b;    
+    float* c_attn_w;
+    float* c_attn_b;
+    float* c_proj_w;
+    float* c_proj_b;
+    float* ln_2_w;
+    float* ln_2_b;
+    float* mlp_c_fc_w;
+    float* mlp_c_fc_b;
+    float* mlp_c_proj_w;
+    float* mlp_c_proj_b;
+    float* ln_f_w;
+    float* ln_f_b;
+}Weights;
 
-typedef struct {
+#define NUM_TENSORS 16
+
+void fill_param_sizes(int* param_sizes,  Config* config){
+    int V = config->vocab_size;
+    int C = config->n_embd;
+    int T  = config->block_size;
+    int L = config->n_layer;
+    param_sizes[0] = V * C;
+    param_sizes[1] = T * C;
+    param_sizes[2] = L * C;
+    param_sizes[3] = L * C;
+    param_sizes[4] = L * (3*C) * C;
+    param_sizes[5] = L * (3*C);
+    param_sizes[6] = L * C * C;
+    param_sizes[7] = L * C;
+    param_sizes[8] = L * C;
+    param_sizes[9] = L * C;
+    param_sizes[10] = L* ( 4 * C) * C;
+    param_sizes[11] = L * (4 * C);
+    param_sizes[12] = L * C * (4 * C);
+    param_sizes[13] = L * C;
+    param_sizes[14] = C;
+    param_sizes[15] = C;
+}
+
+float* alloc_weights(Weights* params, int* param_sizes){
+    int num_params  =  0;
+    for(int i = 0;i<NUM_TENSORS;i++){
+        num_params += param_sizes[i];
+    }
+
+    printf("Number of parameters: %d\n", num_params);
+    size_t size = num_params * sizeof(float);
+    printf("Weights size: %.2ldMB\n", size/1024.0);
+
+    float* params_memory = (float*)calloc(num_params , sizeof(float));
+
+    if(params_memory == NULL){
+        printf("Error allocating memory\n");
+        exit(1);
+    }
+
+    float** ptrs[] = {
+        &params->wte, &params->wpe, &params->ln_1_w, &params->ln_1_b,
+        &params->c_attn_w, &params->c_attn_b, &params->c_proj_w, &params->c_proj_b,
+        &params->ln_2_w, &params->ln_2_b, &params->mlp_c_fc_w, &params->mlp_c_fc_b,
+        &params->mlp_c_proj_w, &params->mlp_c_proj_b, &params->ln_f_w, &params->ln_f_b
+    };
+    float* iter = params_memory;
+    for(int i = 0;i<NUM_TENSORS;i++){
+        *ptrs[i] = iter;
+        iter += param_sizes[i];
+    }
+    return params_memory;
+}
+
+#define NUM_ACTIVATIONS 11
+
+typedef struct Activations {
     float* x;
-    float* xb;
-    float* q;
-    float* k;
-    float* v;
+    float* qkv;
     float* att;
-    float* xb2;
-    float* hb;
-    float* hb2;
-    float* logits;
+    float* atty;
+    float* attproj;
+    float* c_fc;
     float* key_cache;
     float* value_cache;
+    float* logits;
+    float* residual1;
+    float* residual2;
 } Activations;
 
-typedef struct {
-    Config config;
+void fill_activation_sizes(int* activation_sizes, Config* config){
+    int C = config->n_embd;
+    int T = config->block_size;
+    int L = config->n_layer;
+    int NH = config->n_head;
+    int V = config->vocab_size;
+    activation_sizes[0] = C;
+    activation_sizes[1] = 3*C;
+    activation_sizes[2] = NH * T;
+    activation_sizes[3] = C;
+    activation_sizes[4] = C;
+    activation_sizes[5] = 4*C;
+    activation_sizes[6] = L * T * C;
+    activation_sizes[7] = L * T * C;
+    activation_sizes[8] = V;
+    activation_sizes[9] = C;
+    activation_sizes[10] = C;
+}
+
+float* alloc_activations(Activations* activations, int* activation_sizes){
+    int num_activations = 0;
+    for(int i = 0;i<NUM_ACTIVATIONS;i++){
+        num_activations += activation_sizes[i];
+    }
+    size_t size = num_activations * sizeof(float);
+    printf("Activations size: %.2ldMB\n", size/1024.0);
+    float* activations_memory = (float*)calloc(num_activations, sizeof(float));
+    if(activations_memory == NULL){
+        printf("Error allocating memory\n");
+        exit(1);
+    }
+    float** ptrs[] = {
+        &activations->x, &activations->qkv, &activations->att, &activations->atty,
+        &activations->attproj, &activations->c_fc, &activations->key_cache, &activations->value_cache,
+        &activations->logits, &activations->residual1, &activations->residual2
+    };
+    float* iter = activations_memory;
+    for(int i = 0;i<NUM_ACTIVATIONS;i++){
+        *ptrs[i] = iter;
+        iter += activation_sizes[i];
+    }
+    return activations_memory;
+}
+
+typedef struct Model {
     Weights weights;
     Activations activations;
-    int fd;
-    float* data;
-    ssize_t size;
+    Config config;
+    int params_sizes[NUM_TENSORS];
+    int activation_sizes[NUM_ACTIVATIONS];
+    float* params_memory; 
 } Model;
 
-void alloc_activations(Activations* s, Config* config){
-    int kv_dim = config->n_kv_heads * config->n_embd / config->n_heads;
-    s->x = (float*)malloc(config->n_embd*sizeof(float));
-    s->xb = (float*)malloc(config->n_embd*sizeof(float));
-    s->xb2 = (float*)malloc(config->n_embd*sizeof(float));
-    s->hb = (float*)malloc(config->hidden_dim*sizeof(float));
-    s->hb2 = (float*)malloc(config->hidden_dim*sizeof(float));
-    s->q = (float*)malloc(config->n_embd*sizeof(float));
-    s->key_cache = (float*)malloc(config->n_layers*config->seq_len*kv_dim*sizeof(float));
-    s->value_cache = (float*)malloc(config->n_layers*config->seq_len*kv_dim*sizeof(float));
-    s->att = (float*)malloc(config->n_heads * config->seq_len*sizeof(float));
-    s->logits = (float*)malloc(config->vocab_size*sizeof(float));
-}
-
-void memory_map_weights(Weights* w, float* data, Config* config, int shared_weights){
-    int head_size = config->n_embd / config->n_heads;
-    int n_layers = config->n_layers;
-
-    ssize_t num_params = 0;
-    long long x = 0;
-
-    w->wte = data;
-    x = config->vocab_size * config->n_embd;
-    data += x;
-    num_params += x;
-
-    w->rms_attn_weight = data;
-    x = n_layers * config->n_embd;
-    data += x;
-    num_params += x;
-
-    w->wq = data;
-    x = n_layers * config->n_embd * (config->n_heads * head_size);
-    data += x;
-    num_params += x;
-
-    w->wk = data;
-    x = n_layers * config->n_embd * (config->n_kv_heads * head_size);
-    data += x;
-    num_params += x;
-
-    w->wv = data;
-    x = n_layers * config->n_embd * (config->n_kv_heads * head_size);
-    data += x;
-    num_params += x;
-
-    w->wo = data;
-    x = n_layers * config->n_embd * config->n_embd;
-    data += x;
-    num_params += x;
-
-    w->rms_ffn_weight = data;
-    x = n_layers * config->n_embd;
-    data += x;
-    num_params += x;
-
-    w->w1 = data;
-    x = n_layers * config->n_embd * config->hidden_dim;
-    data += x;
-    num_params += x;
-
-    w->w2 = data;
-    x = n_layers * config->hidden_dim * config->n_embd;
-    data += x;
-    num_params += x;
-
-    w->w3 = data;
-    x = n_layers * config->hidden_dim * config->n_embd;
-    data += x;
-    num_params += x;
-
-    w->rms_final_weight = data;
-    x = config->n_embd;
-    data += x;
-    num_params += x;
-
-    data += config->seq_len * head_size / 2;
-    data += config->seq_len * head_size / 2;
-
-    w->wcls = shared_weights ? w->wte : data;
-    if(shared_weights){
-        num_params += 0;
-    }
-    else{
-        x = config->n_embd * config->vocab_size;
-        data += x;
-        num_params += x;
-    }
-    printf("Number of parameters: %ld\n", num_params);
-}
-
-void read_checkpoint(char* filename, Config* config, Weights* weights, 
-                    int* fd, float** data, ssize_t* size){
-
-    FILE* file = fopen(filename, "rb");
-    if(file == NULL){
+void create_model(Model* model, const char* path){
+    FILE* model_file = fopen(path, "rb");
+    if(model_file == NULL){
         printf("Error opening file\n");
         exit(1);
     }
-    if(fread(config, sizeof(Config), 1, file) != 1){
-        printf("Error reading config\n");
+    int model_header[8];
+    size_t ret = fread(model_header, sizeof(int), 8, model_file);
+    if(model_header[0] != 3737 || ret != 8){
+        printf("Invalid model file\n");
         exit(1);
     }
-    int shared_weights = config->vocab_size > 0 ? 1 : 0;
-    config->vocab_size = abs(config->vocab_size);
-    fseek(file, 0, SEEK_END);
-    *size = ftell(file);
+    int T,V,L,C,NH;
+    model->config.block_size = T = model_header[2];
+    model->config.vocab_size = V = model_header[3];
+    model->config.n_layer = L = model_header[4];
+    model->config.n_head = NH = model_header[5];
+    model->config.n_embd = C = model_header[6];
 
-    printf("Size in mb: %f\n", *size/1024.0/1024.0);
+    printf("[Configuration]\n");
+    printf("Block size: %d\n", T);
+    printf("Vocab size: %d\n", V);
+    printf("Number of layers: %d\n", L);
+    printf("Embedding size: %d\n", C);
+    printf("Number of heads: %d\n", NH);
 
-    if(shared_weights){
-        printf("Using shared weights\n");
+    fill_param_sizes(model->params_sizes, &model->config);
+
+    // print("params_sizes : %d\n", model->params_sizes[0]);
+    // print("params_sizes] : %d\n", model->params_sizes[1]);
+    // print("params_sizes] : %d\n", model->params_sizes[2]);
+    // print("params_sizes[3] : %d\n", model->params_sizes[3]);
+    // print("params_sizes[4] : %d\n", model->params_sizes[4]);
+    // print("params_sizes[5] : %d\n", model->params_sizes[5]);
+    // print("params_sizes[6] : %d\n", model->params_sizes[6]);
+    size_t num_params = 0;
+    for(int i = 0;i<NUM_TENSORS;i++){
+        num_params += model->params_sizes[i];
     }
-    else{
-        printf("Using separate weights\n");
-    }
-    fclose(file);
-    *fd = open(filename, O_RDONLY);
-    if(*fd == -1){
-        printf("Error opening file\n");
+    printf("tototot : %ld\n", num_params);
+    model->params_memory = alloc_weights(&model->weights, model->params_sizes);
+    ret = fread(model->params_memory, sizeof(float), num_params, model_file);
+    if(ret != num_params){
+        printf("Error reading model file\n");
         exit(1);
     }
-
-    *data = (float*)mmap(NULL, *size, PROT_READ, MAP_PRIVATE, *fd, 0);
-    if(*data == MAP_FAILED){
-        printf("Error mapping file\n");
-        exit(1);
-    }
-    float* ptr = *data + sizeof(Config)/sizeof(float);
-    memory_map_weights(weights, ptr, config, shared_weights);
+    fclose(model_file);
 }
 
-void encoder(float* out, float* wte, int token,int n_embd){
-    for(int j = 0;j<n_embd;j++){
-        out[j] = wte[token*n_embd+j];
-    }
-}
-
-void rmsnorm(float* out, float* x, float* w, int dim){
-    float ss = 0.0f;
-    for(int j = 0;j<dim;j++){
-        ss += x[j]*x[j];
-    }
-    ss /= dim;
-    ss += 1e-6f;
-    ss = 1.0f/sqrtf(ss);
-    for(int j = 0;j<dim;j++){
-        out[j] = w[j] * (ss*x[j]);
+void embed(float* x, float* wte, float* wpe, int token, int pos, int C){
+    for(int i = 0;i<C;i++){
+        x[i] = wte[token*C + i] + wpe[pos*C + i];
     }
 }
 
-void matmul(float* out, float* x, float* w, int n, int d){
-    for(int i = 0;i<d;i++){
-        float val = 0.0f;
-        for(int j = 0;j<n;j++){
-            val += x[j]*w[i*n+j];
+void layernorm(float* out, float* x, float* w, float* b, int C){
+    float mean = 0;
+    float var = 0;
+    for(int i = 0;i<C;i++){
+        mean += x[i];
+    }
+    mean /= C;
+    for(int i = 0;i<C;i++){
+        float diff = x[i] - mean;
+        var += diff * diff;
+    }
+    var /= C;
+    float scale = 1.0 / sqrt(var + 1e-6);
+    for(int i = 0;i<C;i++){
+        out[i] = (x[i] - mean) * scale * w[i] + b[i];
+    }
+}
+
+void matmul(float* out, float* in, float* w, float* b, int N ,int D){
+    //in is D, w is N,D, b is N, out is N
+    for(int i = 0;i<N;i++){
+        float sum = (b!=NULL) ? b[i] : 0;
+        for(int j = 0;j<D;j++){
+            sum += in[j] * w[i*D + j];
         }
-        out[i] = val;
-    }
+        out[i] = sum;
+    } 
 }
-
-void softmax(float* x, int size){
+void softmax(float* x, int N){
     float max = x[0];
-    for(int i = 1;i<size;i++){
-        if(x[i]>max){
+    for(int i = 1;i<N;i++){
+        if(x[i] > max){
             max = x[i];
         }
     }
-    float sum = 0.0f;
-    for(int i = 0;i<size;i++){
-        x[i] = expf(x[i]-max);
+    float sum = 0;
+    for(int i = 0;i<N;i++){
+        x[i] = exp(x[i] - max);
         sum += x[i];
     }
-    for(int i = 0;i<size;i++){
+    for(int i = 0;i<N;i++){
         x[i] /= sum;
     }
 }
 
-void apply_rotemb(float* k,float* q, int pos, int dim, int head_size, int kv_dim){
-    for(int i = 0;i<dim;i+=2){
-        int head_dim = i % head_size;
-        float freq = 1.0f / powf(10000.0f, head_dim / (float)head_size);
-        float val = pos * freq;
-        float fcr = cosf(val);
-        float fci = sinf(val);
-        int rotn = i < kv_dim ? 2 : 1;
-        for(int v = 0;v<rotn;v++){
-            float* vec = (v==0)? q : k;
-            float v0 = vec[i];
-            float v1 = vec[i+1];
-            vec[i] = v0*fcr - v1*fci;
-            vec[i+1] = v0*fci + v1*fcr;
-        }
+void residual(float* out, float* in, int C){
+    for(int i = 0;i<C;i++){
+        out[i] += in[i];
     }
 }
 
-void residual(float* out, float* x, int dim){
-    for(int i = 0;i<dim;i++){
-        out[i] += x[i];
+void gelu(float* x, int C){
+    for(int i = 0;i<C;i++){
+        float u = x[i];
+        x[i] = 0.5 * u * (1 + tanh(sqrt(2.0/M_PI) * (u + 0.044715 * u * u * u)));
     }
 }
 
-void swiglu(float* hb, float* hb2, int dim){
-    for(int i = 0;i<dim;i++){
-        float val = hb[i];
-        val *= (1.0f / (1.0f + expf(-val)));
-        val *= hb2[i];
-        hb[i] = val;
-    }
-}
+void attention(float* out, float* att, float* qkv, float* key_cache, float* value_cache, int l, int pos, int C, int NH, int head_size, int T){
 
-void attention(float* _att, float* _q, float* _key_cache, float* _value_cache, float* _xb, int pos, int dim, int head_size, int kv_dim, int kv_mul, int n_heads, int seq_len, int n_kv_heads, int n_embd, int L){
-    int skip = L * seq_len * kv_dim;
-    for(int h =0;h < n_heads; h++){
+    float* q = qkv;
+    memcpy(key_cache + l * C * T + pos * C, qkv + C, C * sizeof(float));
+    memcpy(value_cache + l * C * T + pos * C, qkv + 2*C, C * sizeof(float));
 
-        float* q = _q + h*head_size;
-        float* att = _att + h* seq_len;
-        
-        for(int t= 0;t<=pos;t++){
-            float* k = _key_cache + skip + t*kv_dim + (h/kv_mul)*head_size;
+    float scale = 1.0 / sqrt(head_size);
 
-            float score = 0.0f;
-            for(int j = 0;j<head_size;j++){
-                score += q[j]*k[j];
-            }
-            score /= sqrtf(head_size);
-            att[t] = score;
-        }
+    float* k = key_cache + l * C * T;
+    float* v = value_cache + l * C * T;
 
-        softmax(att, pos + 1);
+    for(int h = 0;h<NH;h++){
 
-        float* xb = _xb + h*head_size;
-        memset(xb, 0, head_size*sizeof(float));
+        float* qh = q + h * head_size;
+        float* atth = att + h * T;
+
         for(int t = 0;t<=pos;t++){
-            float* v = _value_cache + skip + t*kv_dim + (h/kv_mul)*head_size;
-            float score = att[t];
-            for(int j = 0;j<head_size;j++){
-                xb[j] += score*v[j];
+            float* kh = k + t * C + h * head_size;
+            float score = 0.0f;
+            for(int i = 0;i<head_size;i++){
+                score += qh[i] * kh[i];
             }
+            score *= scale;
+            atth[t] = score;
+        }
+        for(int t=pos+1;t<T;t++){
+            atth[t] = -INFINITY;
         }
 
-    }
-}
-void print(float* x, int size){
-    for(int i = 0;i<size;i++){
-        printf("%f ", x[i]);
-    }
-    printf("\n");
-}
+        softmax(atth, T);
 
+        float* outh = out + h * head_size;
+        memset(outh, 0, head_size * sizeof(float));
+        for(int t = 0;t<=pos;t++){
+            float* vh = v + t * C + h * head_size;
+            float score = atth[t];
+            for(int i = 0;i<head_size;i++){
+                outh[i] += score * vh[i];
+            }
+        }
+    }
+}
 float* forward(Model* model, int token, int pos){
 
-    Activations* acts = &model->activations;
-    Config* config = &model->config;
-    Weights* weights = &model->weights;
-    int dim = config->n_embd;
-    int head_size = dim/config->n_heads;
-    int kv_dim = config->n_kv_heads * dim / config->n_heads;
-    int kv_mul = config->n_heads / config->n_kv_heads;
+    Config* c = &model->config;
 
-    encoder(acts->x, weights->wte, token, config->n_embd);
-    for(int L = 0;L<config->n_layers;L++){
-    
-        rmsnorm(acts->xb, acts->x, weights->rms_attn_weight + L*dim, dim);
-        matmul(acts->q, acts->xb, weights->wq + L*dim*dim, dim, dim);
-        int skip = L * config->seq_len * kv_dim;
-        acts->k = acts->key_cache + skip + pos*kv_dim;
-        acts->v = acts->value_cache + skip + pos*kv_dim;
-        matmul(acts->k, acts->xb, weights->wk + L*dim*kv_dim, dim, kv_dim);
-        matmul(acts->v, acts->xb, weights->wv + L*dim*kv_dim, dim, kv_dim);
+    int V = c->vocab_size;
+    int L = c->n_layer;
+    int C = c->n_embd;
+    int NH = c->n_head;
+    int T = c->block_size;
+    int head_size = C / NH;
 
-        apply_rotemb(acts->k, acts->q, pos, dim, head_size, kv_dim);
+    Weights* w = &model->weights;
+    Activations* a = &model->activations;
 
-        attention(acts->att, acts->q, acts->key_cache, acts->value_cache, acts->xb, pos, dim, head_size, kv_dim, kv_mul, config->n_heads, config->seq_len, config->n_kv_heads, config->n_embd, L);
+    embed(a->x, w->wte, w->wpe, token, pos, C);
 
-        matmul(acts->xb2, acts->xb, weights->wo + L * dim * dim, dim, dim);
+    for(int l=0;l<L;l++){
 
-        residual(acts->x, acts->xb2, dim);
-
-        rmsnorm(acts->xb, acts->x, weights->rms_ffn_weight + L*dim, dim);
-
-        matmul(acts->hb, acts->xb, weights->w1 + L*dim*config->hidden_dim, dim, config->hidden_dim);
-        matmul(acts->hb2, acts->hb, weights->w3 + L*config->hidden_dim*dim, dim, config->hidden_dim);
-
-        swiglu(acts->hb, acts->hb2, config->hidden_dim);
-
-        matmul(acts->xb, acts->hb, weights->w2 + L * dim*config->hidden_dim, config->hidden_dim, dim);
-
-        residual(acts->x, acts->xb, dim);
+        layernorm(a->residual1, a->x, w->ln_1_w + l*C, w->ln_1_b + l*C, C);
+        matmul(a->qkv, a->residual1, w->c_attn_w + l*3*C*C, w->c_attn_b + l*3*C, 3*C, C);
+        attention(a->atty, a->att, a->qkv, a->key_cache, a->value_cache, l, pos, C, NH, head_size, T);
+        matmul(a->attproj, a->atty, w->c_proj_w + l*C*C, w->c_proj_b + l*C, C, C);
+        residual(a->x, a->attproj, C);
+        layernorm(a->residual2, a->x, w->ln_2_w + l*C, w->ln_2_b + l*C, C);
+        matmul(a->c_fc, a->residual2, w->mlp_c_fc_w + l*4*C*C, w->mlp_c_fc_b + l*4*C, 4*C, C);
+        gelu(a->c_fc, 4*C);
+        matmul(a->residual2, a->c_fc, w->mlp_c_proj_w + l*C*4*C, w->mlp_c_proj_b + l*C, C, 4*C);
+        residual(a->x, a->residual2, C);
     }
-    rmsnorm(acts->x, acts->x, weights->rms_final_weight, dim);
-
-    matmul(acts->logits, acts->x, weights->wcls, dim, config->vocab_size);
-    return acts->logits;
-}
-
-//--------------------------------
-typedef struct {
-    char** vocab;
-    float* vocab_scores;
-    int vocab_size;
-    unsigned int max_token_length;
-} Tokenizer;
-
-void build_tokenizer(Tokenizer* t, char* tokenizer_path, int vocab_size){
-    t->vocab_size = vocab_size;
-    t->vocab = (char**)malloc(vocab_size*sizeof(char*));
-    t->vocab_scores = (float*)malloc(vocab_size*sizeof(float));
-    FILE* file = fopen(tokenizer_path, "r");
-    if(file == NULL){
-        printf("Error opening tokenizer file\n");
-        exit(1);
-    }
-    if(fread(&t->max_token_length, sizeof(int), 1, file) != 1){
-        printf("Error reading max token length\n");
-        exit(1);
-    }
-    int len;
-    for(int i = 0;i<vocab_size;i++){
-        if(fread(t->vocab_scores + i, sizeof(float), 1, file) != 1){
-            printf("Error reading token score\n");
-            exit(1);
-        }
-        if(fread(&len, sizeof(int), 1, file) != 1){
-            printf("Error reading token length\n");
-            exit(1);
-        }
-        t->vocab[i] = (char*)malloc(len+1);
-        if(fread(t->vocab[i], sizeof(char), len, file) != len){
-            printf("Error reading token\n");
-            exit(1);
-        }
-        t->vocab[i][len] = '\0';
-    }
-    fclose(file);
-}
-
-char* decode(Tokenizer* t, int token){
-    char* piece = t->vocab[token];
-    return piece;
-}
-
-//--------------------------------
-typedef struct{
-    float prob;
-    int index;
-}ProbIndex;
-
-typedef struct{
-    int vocab_size;
-    ProbIndex* probindex;
-    float temprature;
-    float topp;
-} Sampler;
-
-int sample_argmax(float* probs, int n){
-    float max = probs[0];
-    int argmax = 0;
-    for(int i = 1;i<n;i++){
-        if(probs[i]>max){
-            max = probs[i];
-            argmax = i;
-        }
-    }
-    return argmax;
-}
-
-void build_sampler(Sampler* s, int vocab_size, float temprature, float topp){
-    s->vocab_size = vocab_size;
-    s->temprature = temprature;
-    s->topp = topp;
-    s->probindex = (ProbIndex*)malloc(vocab_size*sizeof(ProbIndex));
-}
-
-int sample(Sampler* sampler, float* logits){
-    for(int q = 0;q<sampler->vocab_size;q++){
-        logits[q] /= sampler->temprature;
-    }
-    softmax(logits, sampler->vocab_size);
-    int next = sample_argmax(logits, sampler->vocab_size);
-    return next;
-}
-
-void generate(Model* model, Tokenizer* tokenizer, Sampler* sampler, int max_tokens){
-    int next;
-
-    int* tokens = (int*)malloc(5*sizeof(int));
-    tokens[0] = 9038; 
-    tokens[1] = 701;
-    tokens[2] = 29876;
-    tokens[3] = 263;
-    tokens[4] = 931;
-
-    int token = tokens[0];
-    int pos = 0;
-
-    __clock_t start, end;
-    start = clock();
-
-    while(pos < max_tokens){
-        float* logits = forward(model, token, pos);
-
-        if(pos < 5){
-            next = tokens[pos];
-        }
-        else{
-            next = sample(sampler, logits);
-        }
-
-        pos++;
-        token = next;
-        char* piece = decode(tokenizer, token);
-        printf("%s ", piece);
-        fflush(stdout);
-    }
-    printf("\n");
-    
-    end = clock();
-    double time_taken = ((double)end - start)/CLOCKS_PER_SEC;
-    double per_token = time_taken/max_tokens;
-    printf(" A Token took: %f secs\n", per_token);
-
+    layernorm(a->x, a->x, w->ln_f_w, w->ln_f_b, C);
+    matmul(a->logits, a->x, w->wte, NULL, V, C);
+    return a->logits;
 }
 
 int main(){
+
     Model model;
-    
-    read_checkpoint("stories110M.bin", &model.config, &model.weights, &model.fd, &model.data, &model.size);
-    Config config = model.config;
-    printf("[Llama2 Config]\n");
-    printf("n_embd: %d\n", config.n_embd);
-    printf("n_layers: %d\n", config.n_layers);
-    printf("n_heads: %d\n", config.n_heads);
-    printf("n_kv_heads: %d\n", config.n_kv_heads);
-    printf("vocab_size: %d\n", config.vocab_size);
-    printf("seq_len: %d\n", config.seq_len);
-    printf("hidden_dim: %d\n", config.hidden_dim);
+    create_model(&model, "params.bin");
 
-    alloc_activations(&model.activations, &model.config);
-
+    fill_activation_sizes(model.activation_sizes, &model.config);
+    alloc_activations(&model.activations, model.activation_sizes);
     Tokenizer tokenizer;
-    build_tokenizer(&tokenizer, "tokenizer.bin", config.vocab_size);
+    tokenizer_init(&tokenizer, "tokenizer.bin");
 
-    Sampler sampler;
-    build_sampler(&sampler, config.vocab_size, 0.75f, 0.0f);
+    int token = 3737;
+    int pos = 0;
 
-    generate(&model, &tokenizer, &sampler, 64);
+    float* logits = forward(&model, token, pos);
+    softmax(logits, model.config.vocab_size);
 
-
+    int next = 0;
+    float max = 0;
+    for(int i = 0;i<model.config.vocab_size;i++){
+        if(logits[i] > max){
+            max = logits[i];
+            next = i;
+        }
+    }
+    printf("%d\n", next);
+  
     return 0;
+
 }

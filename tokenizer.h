@@ -32,9 +32,9 @@ void safe_printf(const char* piece){
 
 void tokenizer_init(Tokenizer* tokenizer, const char* filename){
     FILE *file = fopenCheck(filename, "rb");
-    int header[8];
-    freadCheck(header, sizeof(int), 8, file);
-    assert(header[0] == 1337);
+    int header[256];
+    freadCheck(header, sizeof(int), 256, file);
+    assert(header[0] == 20240328);
     tokenizer->vocab_size = header[2];
     tokenizer->eot_token = header[3];
 
@@ -49,6 +49,7 @@ void tokenizer_init(Tokenizer* tokenizer, const char* filename){
         tokenizer->token_table[i] = token_bytes;
     }
     fcloseCheck(file);
+    printf("Tokenizer initialized\n");
 }
 
 const char* tokenizer_decode(Tokenizer* tokenizer, int token){
@@ -58,16 +59,10 @@ const char* tokenizer_decode(Tokenizer* tokenizer, int token){
     return tokenizer->token_table[token];
 }
 
-void tokenizer_free(Tokenizer* tokenizer){
-    for(uint32_t i=0;i<tokenizer->vocab_size;i++){
-        free(tokenizer->token_table[i]);
-    }
-    free(tokenizer->token_table);
-}
 // int main() {
     
 //     Tokenizer tokenizer;
-//     tokenizer_init(&tokenizer, "dictionary.bin");
+//     tokenizer_init(&tokenizer, "tokenizer.bin");
 //     int token;
 //     while(scanf("%d", &token) == 1){
 //         const char* piece = tokenizer_decode(&tokenizer, token);
