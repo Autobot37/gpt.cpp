@@ -20,6 +20,14 @@ void print(float* x, int N){
     printf("----------------------\n");
 }
 
+void cudaCheck(cudaError_t error, const char *file, int line) {
+  if (error != cudaSuccess) {
+    printf("[CUDA ERROR] at file %s:%d:\n%s\n", file, line, cudaGetErrorString(error));
+    exit(EXIT_FAILURE);
+  }
+};
+#define cudaCheck(err) (cudaCheck(err, __FILE__, __LINE__))
+
 typedef struct Config {
     int block_size;
     int vocab_size;
@@ -83,12 +91,8 @@ float* alloc_weights(Weights* params, int* param_sizes){
     long long size = num_params * sizeof(float);
     printf("Size of parameters: %lldMB\n", size/1024/1024);
 
-    float* params_memory = (float*)calloc(num_params , sizeof(float));
-
-    if(params_memory == NULL){
-        printf("Error allocating memory\n");
-        exit(1);
-    }
+    float* params_memory;
+    cudaCheck(cudaMalloc((void**)&params_memory, num_params * sizeof(float)));
 
     float** ptrs[] = {
         &params->wte, &params->wpe, &params->ln_1_w, &params->ln_1_b,
@@ -148,11 +152,9 @@ float* alloc_activations(Activations* activations, int* activation_sizes){
     long long size = num_activations * sizeof(float);
     printf("Size of activations: %lldMB\n", size/1024/1024);
     
-    float* activations_memory = (float*)calloc(num_activations, sizeof(float));
-    if(activations_memory == NULL){
-        printf("Error allocating memory\n");
-        exit(1);
-    }
+    float* activations_memory;
+    cudaCheck(cudaMalloc((void**)&activations_memory, num_activations * sizeof(float)));
+   
     float** ptrs[] = {
         &activations->x, &activations->qkv, &activations->att, &activations->atty,
         &activations->attproj, &activations->c_fc, &activations->key_cache, &activations->value_cache,
@@ -208,29 +210,42 @@ void create_model(Model* model, const char* path){
         num_params += model->params_sizes[i];
     }
     model->params_memory = alloc_weights(&model->weights, model->params_sizes);
-    ret = fread(model->params_memory, sizeof(float), num_params, model_file);
-    if(ret != num_params){
+    float* params_memory_cpu = (float*)malloc(num_params * sizeof(float));
+    ret = fread(params_memory_cpu, 1, num_params * sizeof(float), model_file);
+    if(ret != num_params * sizeof(float)){
         printf("Error reading model file\n");
         exit(1);
     }
+    cudaCheck(cudaMemcpy(model->params_memory, params_memory_cpu, num_params * sizeof(float), cudaMemcpyHostToDevice));
+    free(params_memory_cpu);
     fclose(model_file);
 }
 
-float* forward(Model* model, int token, int pos){
+float* forward(Model* model, int _token, int _pos){
 
     Config* c = &model->config;
 
-    int V = c->vocab_size;
-    int L = c->n_layer;
-    int C = c->n_embd;
-    int NH = c->n_head;
-    int T = c->block_size;
-    int head_size = C / NH;
+    int _V = c->vocab_size;
+    int _L = c->n_layer;
+    int _C = c->n_embd;
+    int _NH = c->n_head;
+    int _T = c->block_size;
+    int _head_size = _C / _NH;
 
     Weights* w = &model->weights;
     Activations* a = &model->activations;
 
-    embed(a->x, w->wte, w->wpe, token, pos, C);
+    int V, L, C, NH, T, head_size, token, pos;
+    cudaMemcpyToSymbol(V, &_V, sizeof(int));
+    cudaMemcpyToSymbol(L, &_L, sizeof(int));
+    cudaMemcpyToSymbol(C, &_C, sizeof(int));
+    cudaMemcpyToSymbol(NH, &_NH, sizeof(int));
+    cudaMemcpyToSymbol(T, &_T, sizeof(int));
+    cudaMemcpyToSymbol(head_size, &_head_size, sizeof(int));
+    cudaMemcpyToSymbol(token, &_token, sizeof(int));
+    cudaMemcpyToSymbol(pos, &_pos, sizeof(int));
+
+    embed(a->x, w->wte, w->wpe, token, pos, C);   
 
     for(int l=0;l<L;l++){
 
@@ -255,25 +270,33 @@ void generate(Model* model, Tokenizer* tokenizer, int max_tokens){
     int token = 50256;
     int pos = 0;
 
+    float* logits_cpu = (float*)malloc(model->config.vocab_size * sizeof(float));
+    // if(logits_cpu == NULL){
+    //     printf("Error allocating memory\n");
+    //     exit(1);
+    // }
+
     clock_t start, end;
     start = clock();
 
     for(int i = 0;i<max_tokens;i++){
         float* logits = forward(model, token, pos);
-        softmax(logits, model->config.vocab_size);
-        int next = 0;
-        float max = 0;
-        for(int i = 0;i<model->config.vocab_size;i++){
-            if(logits[i] > max){
-                max = logits[i];
-                next = i;
-            }
-        }
-        const char* piece = tokenizer_decode(tokenizer, next);
-        // safe_printf(piece);
-        printf("%d ", next);
-        fflush(stdout);
-        token = next;
+        // cudaMemcpy(logits_cpu, model->activations.logits, model->config.vocab_size * sizeof(float), cudaMemcpyDeviceToHost);
+        // softmax(logits_cpu, model->config.vocab_size);
+        // int next = 0;
+        // float max = 0;
+        // for(int i = 0;i<model->config.vocab_size;i++){
+        //     if(logits_cpu[i] > max){
+        //         max = logits[i];
+        //         next = i;
+        //     }
+        // }
+        // const char* piece = tokenizer_decode(tokenizer, next);
+        // // safe_printf(piece);
+        // printf("%d ", next);
+        // fflush(stdout);
+        // token = next;
+        token++;
         pos++;
     }
     printf("\n");
@@ -287,13 +310,13 @@ int main(){
 
     Model model;
     create_model(&model, "params.bin");
-
+\
     fill_activation_sizes(model.activation_sizes, &model.config);
     alloc_activations(&model.activations, model.activation_sizes);
     Tokenizer tokenizer;
     tokenizer_init(&tokenizer, "tokenizer.bin");
 
-    generate(&model, &tokenizer, 32);
+    generate(&model, &tokenizer, 256);
   
     return 0;
 
