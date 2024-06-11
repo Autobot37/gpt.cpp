@@ -43,6 +43,17 @@ jobs:
       steps:
         - name: Checkout code
           uses: actions/checkout@v4
+
+        - name: Install OpenMP
+          run: |
+            sudo apt-get update
+            sudo apt-get install libomp-dev -y
+        
+        - name: Install dependencies
+          run: pip install -r requirements.txt
+        
+        - name: Init Weights
+          run: python3 pythonscripts/model.py
   
         - name: Build FP32 checkpoint
           run: make run_cuda && ./executable
