@@ -77,9 +77,9 @@ float* alloc_weights(Weights* params, int* param_sizes){
         num_params += param_sizes[i];
     }
 
-    printf("Number of parameters: %d\n", num_params);
-    size_t size = num_params * sizeof(float);
-    printf("Weights size: %.2ldMB\n", size/1024.0);
+    printf("Number of parameters: %.2fM\n", num_params/1e6);
+    long long size = num_params * sizeof(float);
+    printf("Size of parameters: %lldMB\n", size/1024/1024);
 
     float* params_memory = (float*)calloc(num_params , sizeof(float));
 
@@ -142,8 +142,10 @@ float* alloc_activations(Activations* activations, int* activation_sizes){
     for(int i = 0;i<NUM_ACTIVATIONS;i++){
         num_activations += activation_sizes[i];
     }
-    size_t size = num_activations * sizeof(float);
-    printf("Activations size: %.2ldMB\n", size/1024.0);
+
+    long long size = num_activations * sizeof(float);
+    printf("Size of activations: %lldMB\n", size/1024/1024);
+    
     float* activations_memory = (float*)calloc(num_activations, sizeof(float));
     if(activations_memory == NULL){
         printf("Error allocating memory\n");
@@ -199,18 +201,10 @@ void create_model(Model* model, const char* path){
 
     fill_param_sizes(model->params_sizes, &model->config);
 
-    // print("params_sizes : %d\n", model->params_sizes[0]);
-    // print("params_sizes] : %d\n", model->params_sizes[1]);
-    // print("params_sizes] : %d\n", model->params_sizes[2]);
-    // print("params_sizes[3] : %d\n", model->params_sizes[3]);
-    // print("params_sizes[4] : %d\n", model->params_sizes[4]);
-    // print("params_sizes[5] : %d\n", model->params_sizes[5]);
-    // print("params_sizes[6] : %d\n", model->params_sizes[6]);
     size_t num_params = 0;
     for(int i = 0;i<NUM_TENSORS;i++){
         num_params += model->params_sizes[i];
     }
-    printf("tototot : %ld\n", num_params);
     model->params_memory = alloc_weights(&model->weights, model->params_sizes);
     ret = fread(model->params_memory, sizeof(float), num_params, model_file);
     if(ret != num_params){
@@ -360,6 +354,29 @@ float* forward(Model* model, int token, int pos){
     return a->logits;
 }
 
+void generate(Model* model, Tokenizer* tokenizer, int max_tokens){
+
+    int token = 50256;
+    int pos = 0;
+
+    for(int i = 0;i<max_tokens;i++){
+        float* logits = forward(model, token, pos);
+        softmax(logits, model->config.vocab_size);
+        int next = 0;
+        float max = 0;
+        for(int i = 0;i<model->config.vocab_size;i++){
+            if(logits[i] > max){
+                max = logits[i];
+                next = i;
+            }
+        }
+        char* piece = tokenizer_decode(tokenizer, next);
+        safe_printf(piece);
+        token = next;
+        pos++;
+    }
+}
+
 int main(){
 
     Model model;
@@ -370,21 +387,7 @@ int main(){
     Tokenizer tokenizer;
     tokenizer_init(&tokenizer, "tokenizer.bin");
 
-    int token = 3737;
-    int pos = 0;
-
-    float* logits = forward(&model, token, pos);
-    softmax(logits, model.config.vocab_size);
-
-    int next = 0;
-    float max = 0;
-    for(int i = 0;i<model.config.vocab_size;i++){
-        if(logits[i] > max){
-            max = logits[i];
-            next = i;
-        }
-    }
-    printf("%d\n", next);
+    forward(&model, tokenizer, 32);
   
     return 0;
 
