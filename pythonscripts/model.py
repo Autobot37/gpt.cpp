@@ -250,13 +250,17 @@ def write_tokenizer(enc, filename):
 
 import tiktoken
 enc = tiktoken.get_encoding("gpt2")
+encoded = enc.encode("something is wrong, please save me")
+print(encoded)
 write_tokenizer(enc, "tokenizer.bin")
 
 model = GPT.from_pretrained('gpt2-medium')
 print(Config)
 # model = GPT(Config)
-next = model.generate(torch.tensor([[3737]]), 32)
+next = model.generate(torch.tensor([[50256]]), 128)
 print(next)
+decoded = enc.decode(next[0].tolist())
+print(decoded)
 # print("-----------------------")
 # logits, _ = model(torch.tensor([[1, next]]))
 params_path = "params.bin"

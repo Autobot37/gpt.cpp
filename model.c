@@ -20,6 +20,38 @@ void print(float* x, int N){
     printf("----------------------\n");
 }
 
+typedef struct {
+    int vocab_size;
+    float temprature;
+} Sampler;
+
+void build_sampler(Sampler* sampler, int vocab_size, float temprature){
+    sampler->vocab_size = vocab_size;
+    sampler->temprature = temprature;
+}
+
+int sample_multi(float* probabilities, int n, float coin){
+    float cdf = 0.0f;
+    for(int i = 0;i<n;i++){
+        cdf += probabilities[i];
+        if(cdf > coin){
+            return i;
+        }
+    }
+    return n-1;
+}
+
+int sample(Sampler* sampler, float* logits){
+    int next;
+    for(int i = 0;i<sampler->vocab_size;i++){
+        logits[i] /= sampler->temprature;
+    }
+    softmax(logits, sampler->vocab_size);
+    float coin = (float)rand() / RAND_MAX;
+    next = sample_multi(logits, sampler->vocab_size, coin);
+    return next;
+}
+
 typedef struct Config {
     int block_size;
     int vocab_size;
@@ -251,32 +283,40 @@ float* forward(Model* model, int token, int pos){
     return a->logits;
 }
 
-void generate(Model* model, Tokenizer* tokenizer, int max_tokens){
+void generate(Model* model, Tokenizer* tokenizer, int max_tokens, int* tokens, Sampler* sampler, int num_tokens){
 
-    int token = 3737;
+    int token = tokens[0];
     int pos = 0;
+    int next;
+    printf("Number of tokens: %d\n", num_tokens);
 
     clock_t start, end;
     start = clock();
     float* logits;
 
-    for(int idx = 0;idx<max_tokens;idx++){
-        logits = forward(model, token, pos);
-        softmax(logits, model->config.vocab_size);
-        int next = 0;
-        float max = 0;
-        for(int i = 0;i<model->config.vocab_size;i++){
-            if(logits[i] > max){
-                max = logits[i];
-                next = i;
-            }
+    while(pos < max_tokens){
+        float* logits = forward(model, token, pos);
+        if(pos < num_tokens - 1){
+            next = tokens[pos + 1];
         }
-        const char* piece = tokenizer_decode(tokenizer, next);
-        // safe_printf(piece);
-        printf("%d ", next);
-        fflush(stdout);
-        token = next;
+        else{
+            next = sample(sampler, logits);
+        }
         pos++;
+        char* piece = tokenizer_decode(tokenizer, token, next);
+        piece = safe_printf(piece);
+        token = next;
+        if(token == tokenizer->eot_token){
+            printf("\n");
+            continue;
+        }
+        if(piece == NULL){
+            continue;
+        }
+        else{
+            printf("%s", piece);
+            fflush(stdout);
+        }
     }
     printf("\n");
     end = clock();
@@ -284,6 +324,7 @@ void generate(Model* model, Tokenizer* tokenizer, int max_tokens){
     double one_token = (time_taken / max_tokens) * 1000;
     printf("One token took %.6f ms\n", one_token);
 }
+
 
 int main(){
 
@@ -295,7 +336,11 @@ int main(){
     Tokenizer tokenizer;
     tokenizer_init(&tokenizer, "tokenizer.bin");
 
-    generate(&model, &tokenizer, 32);
+    Sampler sampler;
+    build_sampler(&sampler, model.config.vocab_size, 0.7);
+    
+    int tokens[] = {18927, 318, 2642, 11, 3387, 3613, 502};
+    generate(&model, &tokenizer, 128, tokens, &sampler, 3);
 
     return 0;
 
