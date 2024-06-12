@@ -264,4 +264,4 @@ print(decoded)
 # print("-----------------------")
 # logits, _ = model(torch.tensor([[1, next]]))
 params_path = "params.bin"
-# write_model(model, params_path)
+write_model(model, params_path)
