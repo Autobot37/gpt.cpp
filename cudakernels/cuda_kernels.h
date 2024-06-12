@@ -86,8 +86,14 @@ void gemm(float* out, float* in, float* w, float* b, int N, int D) {
     if (status != CUBLAS_STATUS_SUCCESS) {
         printf("cublasSgemv failed\n");
     }
-    if(b != NULL)
-    add_bias<<<(N + 1023) / 1024, 1024>>>(out, b, N);
+    if(b != NULL) {
+        add_bias<<<(N + 1023) / 1024, 1024>>>(out, b, N);
+        cudaError_t err = cudaGetLastError();
+        if (err != cudaSuccess) {
+            printf("add_bias kernel launch failed: %s\n", cudaGetErrorString(err));
+        }
+    }
+
 }
 //-----------------------------------------------------------------------------------------------
 __global__ void residual_kernel(float* out, float* in, int C){
@@ -118,50 +124,58 @@ void gelu_gpu(float* x, int C){
     gelu_kernel<<<num_blocks, num_threads>>>(x, C);
 }
 //-----------------------------------------------------------------------------------------------
-__global__ void softmax_kernel(float*x, int N){
+__global__ void softmax_kernel(float* x, int N) {
     int idx = threadIdx.x;
     __shared__ float smax[1024];
     __shared__ float ssum[1024];
-    smax[idx] = 0.0f;
+    
+    smax[idx] = -FLT_MAX; 
     ssum[idx] = 0.0f;
     __syncthreads();
 
-    for(int i=idx;i<N;i+=blockDim.x){
+    for (int i = idx; i < N; i += blockDim.x) {
         smax[idx] = fmaxf(smax[idx], x[i]);
     }
     __syncthreads();
-    if(idx == 0){
-        float maxval = -INFINITY;
-        for(int i = 0;i<blockDim.x;i++){
+    
+    if (idx == 0) {
+        float maxval = -FLT_MAX;
+        for (int i = 0; i < blockDim.x; i++) {
             maxval = fmaxf(maxval, smax[i]);
         }
         smax[0] = maxval;
     }
     __syncthreads();
+    
     float maxval = smax[0];
-    for(int i=idx;i<N;i+=blockDim.x){
-        x[i] = exp(x[i] - maxval);
-        ssum[idx] += x[i];
+    float local_sum = 0.0f;
+    for (int i = idx; i < N; i += blockDim.x) {
+        x[i] = expf(x[i] - maxval);
+        local_sum += x[i];
     }
+    ssum[idx] = local_sum;
     __syncthreads();
-    if(idx == 0){
-        float sum = 0;
-        for(int i = 0;i<blockDim.x;i++){
+    
+    if (idx == 0) {
+        float sum = 0.0f;
+        for (int i = 0; i < blockDim.x; i++) {
             sum += ssum[i];
         }
         ssum[0] = sum;
     }
     __syncthreads();
+    
     float sum = ssum[0];
-    for(int i=idx;i<N;i+=blockDim.x){
+    for (int i = idx; i < N; i += blockDim.x) {
         x[i] /= sum;
     }
 }
 
-void softmax_gpu(float*x, int N){
+void softmax_gpu(float* x, int N) {
     int numThreads = 1024;
     softmax_kernel<<<1, numThreads>>>(x, N);
 }
+
 
 //-----------------------------------------------------------------------------------------------
 
@@ -173,9 +187,9 @@ __device__ void softmaxg(float* x, int N){
             max = x[i];
         }
     }
-    float sum = 0;
+    float sum = 0.0;
     for(int i = 0;i<N;i++){
-        x[i] = exp(x[i] - max);
+        x[i] = expf(x[i] - max);
         sum += x[i];
     }
     for(int i = 0;i<N;i++){
@@ -211,7 +225,7 @@ void attention_kernel(float* out, float* att, float* qkv, float* key_cache, floa
         atth[t] = score;
     }
     for(int t=pos+1;t<T;t++){
-        atth[t] = -INFINITY;
+        atth[t] = __int_as_float(0xff800000);
     }
 
     softmaxg(atth, T);
@@ -229,9 +243,10 @@ void attention_kernel(float* out, float* att, float* qkv, float* key_cache, floa
 void attention_gpu(float* out, float* att, float* qkv, float* key_cache, float* value_cache, int l, int pos, int C, int NH, int head_size, int T){
     int numThreads = 1024;
     int blocks = (NH + numThreads - 1) / numThreads;
+    cudaMemset(out, 0, C * sizeof(float));
+
     cudaMemcpy(key_cache + l * C * T + pos * C, qkv + C, C * sizeof(float), cudaMemcpyDeviceToDevice);
     cudaMemcpy(value_cache + l * C * T + pos * C, qkv + 2*C, C * sizeof(float), cudaMemcpyDeviceToDevice);
-    cudaMemset(out, 0, C * sizeof(float));
     attention_kernel<<<blocks, numThreads>>>(out, att, qkv, key_cache, value_cache, l, pos, C, NH, head_size, T);
 }
 //-----------------------------------------------------------------------------------------------

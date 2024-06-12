@@ -14,7 +14,7 @@ void rand_init(float* x, int N){
 
 void print(float* x, int N){
     for(int i = 0;i<N;i++){
-        printf("%.4f ", x[i]);
+        printf("%.6f ", x[i]);
     }
     printf("\n");
     printf("----------------------\n");
@@ -253,14 +253,15 @@ float* forward(Model* model, int token, int pos){
 
 void generate(Model* model, Tokenizer* tokenizer, int max_tokens){
 
-    int token = 50256;
+    int token = 3737;
     int pos = 0;
 
     clock_t start, end;
     start = clock();
+    float* logits;
 
-    for(int i = 0;i<max_tokens;i++){
-        float* logits = forward(model, token, pos);
+    for(int idx = 0;idx<max_tokens;idx++){
+        logits = forward(model, token, pos);
         softmax(logits, model->config.vocab_size);
         int next = 0;
         float max = 0;
@@ -294,10 +295,8 @@ int main(){
     Tokenizer tokenizer;
     tokenizer_init(&tokenizer, "tokenizer.bin");
 
-    float* logits = forward(&model, 50256, 0);
-
     generate(&model, &tokenizer, 32);
-  
+
     return 0;
 
 }
