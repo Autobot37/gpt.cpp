@@ -20,6 +20,7 @@ void isequal(float* a, float* b, int n){
             cout << "Mismatch at index " << i << " CPU: " << a[i] << " GPU: " << b[i] << endl;
         }
     }
+    cout << "Done" << endl;
 }
 
 void softmax(float* x, int N){
