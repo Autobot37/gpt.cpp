@@ -172,7 +172,7 @@ class GPT(nn.Module):
                 v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
                 logits[logits < v[:, [-1]]] = -float('inf')
             probs = F.softmax(logits,dim=-1)
-            idx_next = torch.argmax(probs, dim=-1, keepdim=True)
+            idx_next = torch.multinomial(probs, num_samples=1)
             idx = torch.cat((idx,idx_next), dim=-1)
         return idx
 
@@ -250,18 +250,20 @@ def write_tokenizer(enc, filename):
 
 import tiktoken
 enc = tiktoken.get_encoding("gpt2")
-encoded = enc.encode("something is wrong, please save me")
-print(encoded)
+text = """
+Lightning McQueen, the red racecar famous for his speed and charisma, found himself at a crossroads. After a series of high-stakes races and championship wins, he yearned for something more. The thrill of racing no longer gave him the same rush it once did.
+One day, while cruising through Radiator Springs, he noticed a group of young cars practicing their driving skills. Inspired by their enthusiasm, McQueen decided to share his knowledge and experience with the next generation. He opened the Lightning McQueen Racing Academy, dedicated to training aspiring racers.
+"""
+encoded = enc.encode(text)
+# print(encoded)
 write_tokenizer(enc, "tokenizer.bin")
 
-model = GPT.from_pretrained('gpt2-medium')
-print(Config)
-# model = GPT(Config)
-next = model.generate(torch.tensor([[50256]]), 128)
+model = GPT.from_pretrained('gpt2')
+params_path = "params.bin"
+write_model(model, params_path)
+model = model.to("cuda")
+encoded = torch.tensor(encoded, device="cuda", dtype=torch.int32).unsqueeze(0)
+next = model.generate(encoded, 512)
 print(next)
 decoded = enc.decode(next[0].tolist())
 print(decoded)
-# print("-----------------------")
-# logits, _ = model(torch.tensor([[1, next]]))
-params_path = "params.bin"
-write_model(model, params_path)
