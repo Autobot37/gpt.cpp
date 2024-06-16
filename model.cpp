@@ -3,6 +3,8 @@
 #include <string.h>
 #include <math.h>
 #include <time.h>
+#include <assert.h>
+#include <float.h>
 #include "tokenizer.h"
 #include "kernels/kernels.h"
 
@@ -32,6 +34,8 @@ void isequal(float* a, float* b, int n){
     }
 }
 
+bool CHECK = false;
+
 typedef struct {
     int vocab_size;
     float temprature;
@@ -42,10 +46,20 @@ void build_sampler(Sampler* sampler, int vocab_size, float temprature){
     sampler->temprature = temprature;
 }
 
+int sample_multi(float* probabilities, int n, float coin){
+    float cdf = 0.0f;
+    for(int i = 0;i<n;i++){
+        cdf += probabilities[i];
+        if(cdf > coin){
+            return i;
+        }
+    }
+    return n-1;
+}
 int sample_argmax(float* probabilities, int n){
     int max_idx = 0;
-    float max_val = probabilities[0];
-    for(int i = 1;i<n;i++){
+    float max_val = -FLT_MAX;
+    for(int i = 0;i<n;i++){
         if(probabilities[i] > max_val){
             max_val = probabilities[i];
             max_idx = i;
@@ -60,7 +74,13 @@ int sample(Sampler* sampler, float* logits){
         logits[i] /= sampler->temprature;
     }
     softmax(logits, sampler->vocab_size);
-    next = sample_argmax(logits, sampler->vocab_size);
+    float coin = (float)rand() / RAND_MAX;
+    if(CHECK){
+        next = sample_argmax(logits, sampler->vocab_size);
+    }
+    else{
+        next = sample_multi(logits, sampler->vocab_size, coin);
+    }
     return next;
 }
 
@@ -294,23 +314,25 @@ float* forward(Model* model, int token, int pos){
     matmul(a->logits, a->x, w->wte, NULL, V, C);
     return a->logits;
 }
+#define COLOR_RESET "\x1b[0m"
+#define COLOR_GREEN "\x1b[32m"
+#define STYLE_BOLD "\x1b[1m"
+#define STYLE_UNDERLINE "\x1b[4m"
 
-int* generate(Model* model, Tokenizer* tokenizer, int max_tokens, int* tokens, Sampler* sampler, int num_tokens){
+int* generate(Model* model, Tokenizer* tokenizer, int max_tokens, vector<int>& tokens, Sampler* sampler, int num_tokens){
     int* generated_tokens = (int*)malloc((max_tokens + num_tokens) * sizeof(int));
+    float* logits;
 
     int token = tokens[0];
     int pos = 0;
     int next;
-    printf("Number of tokens: %d\n", num_tokens);
-
     clock_t start, end;
     start = clock();
-    float* logits;
-    printf("Generating tokens: \n");
-    printf("%d ", token);
+    if(!CHECK)printf(COLOR_GREEN STYLE_BOLD "%s" COLOR_RESET, tokenizer->decode(token, token).c_str());
     generated_tokens[pos] = token;
     while(pos < max_tokens + num_tokens - 1){
         float* logits = forward(model, token, pos);
+
         if(pos < num_tokens - 1){
             next = tokens[pos + 1];
         }
@@ -319,9 +341,13 @@ int* generate(Model* model, Tokenizer* tokenizer, int max_tokens, int* tokens, S
         }
         pos++;
         token = next;
-        printf(" %d ", token);
+        // printf(" %d", token);
+        string piece = tokenizer->decode(next, token);
+        piece = safe_printf(piece);
+        if(!CHECK)printf(COLOR_GREEN STYLE_BOLD "%s" COLOR_RESET, piece.c_str());
         fflush(stdout);
         generated_tokens[pos] = token;
+        if(!CHECK && token==1)break;
     }
     printf("\n");
     end = clock();
@@ -332,6 +358,35 @@ int* generate(Model* model, Tokenizer* tokenizer, int max_tokens, int* tokens, S
     return generated_tokens;
 }
 
+void completion(Model* model, Tokenizer* tokenizer, Sampler* sampler, char* prompt, int max_tokens){
+    vector<int>tokens = tokenizer->encode(prompt);
+    int num_tokens = tokens.size();
+    printf("Number of tokens: %d\n", num_tokens);
+    generate(model, tokenizer, max_tokens, tokens, sampler, num_tokens);
+}
+
+void chat(Model* model, Tokenizer* tokenizer, Sampler* sampler) {
+    char prompt[512];
+    char context[512] = ""; 
+    while (true) {
+        printf("You: ");
+        fgets(prompt, 512, stdin);
+        int len = strlen(prompt);
+        if (len > 0 && prompt[len - 1] == '\n') {
+            prompt[len - 1] = '\0';
+        }
+
+        if (strcmp(prompt, "exit") == 0) {
+            break;
+        }
+
+        char combined_prompt[1024];
+        snprintf(combined_prompt, sizeof(combined_prompt), "%s %s", context, prompt);
+        completion(model, tokenizer, sampler, combined_prompt, 128);
+        strncpy(context, combined_prompt, sizeof(context) - 1);
+        context[sizeof(context) - 1] = '\0'; 
+    }
+}
 void check_output(char* path, Model* model, Sampler* sampler, Tokenizer* tokenizer){
     FILE* file = fopen(path, "r");
     if(file == NULL){
@@ -363,7 +418,8 @@ void check_output(char* path, Model* model, Sampler* sampler, Tokenizer* tokeniz
     }
     fclose(file);
 
-    int* gen_tokens = generate(model, tokenizer, max_length, file_tokens, sampler, num_tokens);
+    vector<int> v_file_tokens(file_tokens, file_tokens + num_tokens);
+    int* gen_tokens = generate(model, tokenizer, max_length, v_file_tokens, sampler, num_tokens);
     for(int i = 0;i<max_length;i++){
         assert(gen_tokens[i] == file_next_tokens[i]);
     }
@@ -372,20 +428,25 @@ void check_output(char* path, Model* model, Sampler* sampler, Tokenizer* tokeniz
 
 int main(){
 
+    srand(time(NULL));
+
     Model model;
     create_model(&model, "params.bin");
 
     fill_activation_sizes(model.activation_sizes, &model.config);
     alloc_activations(&model.activations, model.activation_sizes);
     Tokenizer tokenizer;
-    tokenizer_init(&tokenizer, "tokenizer.bin");
-
-    Sampler sampler;
-    build_sampler(&sampler, model.config.vocab_size, 1.0);
+    tokenizer.init("tokenizer.bin");
     
+    Sampler sampler;
+    build_sampler(&sampler, model.config.vocab_size, 0.7);
+    CHECK = true;
     check_output("debug.bin", &model, &sampler, &tokenizer);
     printf("All tests passed\n");
     printf("-----------------------------\n");
+    CHECK = false;
+
+    chat(&model, &tokenizer, &sampler);
 
     return 0;
 

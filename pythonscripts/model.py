@@ -7,6 +7,71 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+
+#-----------------------------------------------------------------------------
+import tiktoken
+from anytree import Node, RenderTree
+
+enc = tiktoken.get_encoding("gpt2")
+prompt = "am i dreamin is there more like us?"
+tokens = enc.encode(prompt)
+n = enc.n_vocab 
+
+vocab = []
+for i in range(n):
+    vocab.append(enc.decode([i]))
+
+
+class TrieNode:
+    def __init__(self, char=None):
+        self.children = {}
+        self.token_length = -1
+        self.token_id = -1
+        self.char = char
+
+    def init(self, strings):
+        for i, token in enumerate(strings):
+            node = self
+            for char in token:
+                if char not in node.children:
+                    child_node = TrieNode(char)
+                    node.children[char] = child_node
+                node = node.children[char]
+            node.token_length = len(token)
+            node.token_id = i
+    
+    def encode(self, prompt):
+        encoded = []
+        node = self
+        i = 0
+        last_token_id = -1
+        while i < len(prompt):
+            key = prompt[i]
+            if key not in node.children:
+                print("Not found", key)
+                node = self
+                encoded.append(last_token_id)
+                last_token_id = -1
+                continue
+            node = node.children[key]
+            if node.token_id != -1:
+                last_token_id = node.token_id
+            i += 1
+        encoded.append(last_token_id)
+        return encoded
+    
+    def create_tree(self):
+        self.node = Node(self.char)
+        for char, child in self.children.items():
+            child_node = child.create_tree()
+            child_node.parent = self.node
+        return self.node
+
+    def print_tree(self):
+        root_node = self.create_tree()
+        print(RenderTree(root_node))            
+#//-----------------------------------------------------------------------------
+
 @dataclass
 class Config:
     n_embd:int = 4

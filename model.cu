@@ -5,6 +5,7 @@
 #include <time.h>
 #include <cublas_v2.h>
 #include <float.h>
+#include <assert.h>
 #include "tokenizer.h"
 #include "kernels/kernels.h"
 #include "cudakernels/cuda_kernels.h"
@@ -323,17 +324,21 @@ float* forward(Model* model, int token, int pos){
     return a->logits;
 }
 
-int* generate(Model* model, Tokenizer* tokenizer, int max_tokens, int* tokens, Sampler* sampler, int num_tokens){
+#define COLOR_RESET "\x1b[0m"
+#define COLOR_GREEN "\x1b[32m"
+#define STYLE_BOLD "\x1b[1m"
+#define STYLE_UNDERLINE "\x1b[4m"
+
+int* generate(Model* model, Tokenizer* tokenizer, int max_tokens, vector<int>& tokens, Sampler* sampler, int num_tokens){
     int* generated_tokens = (int*)malloc((max_tokens + num_tokens) * sizeof(int));
     float* logits = (float*)malloc(model->config.vocab_size * sizeof(float));
 
     int token = tokens[0];
     int pos = 0;
     int next;
-
     clock_t start, end;
     start = clock();
-    if(!CHECK)printf("%d ", token);
+    if(!CHECK)printf(COLOR_GREEN STYLE_BOLD "%s" COLOR_RESET, tokenizer->decode(token, token).c_str());
     generated_tokens[pos] = token;
     while(pos < max_tokens + num_tokens - 1){
         float* gpu_logits = forward(model, token, pos);
@@ -348,11 +353,12 @@ int* generate(Model* model, Tokenizer* tokenizer, int max_tokens, int* tokens, S
         pos++;
         token = next;
         // printf(" %d", token);
-        char* piece = tokenizer_decode(tokenizer, next, token);
+        string piece = tokenizer->decode(next, token);
         piece = safe_printf(piece);
-        if(!CHECK)printf("%s", piece);
+        if(!CHECK)printf(COLOR_GREEN STYLE_BOLD "%s" COLOR_RESET, piece.c_str());
         fflush(stdout);
         generated_tokens[pos] = token;
+        if(!CHECK && token==1)break;
     }
     printf("\n");
     end = clock();
@@ -361,6 +367,36 @@ int* generate(Model* model, Tokenizer* tokenizer, int max_tokens, int* tokens, S
     printf("One token took %.6f ms\n", one_token);
 
     return generated_tokens;
+}
+
+void completion(Model* model, Tokenizer* tokenizer, Sampler* sampler, char* prompt, int max_tokens){
+    vector<int>tokens = tokenizer->encode(prompt);
+    int num_tokens = tokens.size();
+    printf("Number of tokens: %d\n", num_tokens);
+    generate(model, tokenizer, max_tokens, tokens, sampler, num_tokens);
+}
+
+void chat(Model* model, Tokenizer* tokenizer, Sampler* sampler) {
+    char prompt[512];
+    char context[512] = ""; 
+    while (true) {
+        printf("You: ");
+        fgets(prompt, 512, stdin);
+        int len = strlen(prompt);
+        if (len > 0 && prompt[len - 1] == '\n') {
+            prompt[len - 1] = '\0';
+        }
+
+        if (strcmp(prompt, "exit") == 0) {
+            break;
+        }
+
+        char combined_prompt[1024];
+        snprintf(combined_prompt, sizeof(combined_prompt), "%s %s", context, prompt);
+        completion(model, tokenizer, sampler, combined_prompt, 128);
+        strncpy(context, combined_prompt, sizeof(context) - 1);
+        context[sizeof(context) - 1] = '\0'; 
+    }
 }
 
 void check_output(char* path, Model* model, Sampler* sampler, Tokenizer* tokenizer){
@@ -394,13 +430,15 @@ void check_output(char* path, Model* model, Sampler* sampler, Tokenizer* tokeniz
     }
     fclose(file);
 
-    int* gen_tokens = generate(model, tokenizer, max_length, file_tokens, sampler, num_tokens);
+    vector<int> v_file_tokens(file_tokens, file_tokens + num_tokens);
+    int* gen_tokens = generate(model, tokenizer, max_length, v_file_tokens, sampler, num_tokens);
     for(int i = 0;i<max_length;i++){
         assert(gen_tokens[i] == file_next_tokens[i]);
     }
 }
 
-int main(){
+
+int main(int argc, char* argv[]){
 
     srand(time(NULL));
 
@@ -412,7 +450,7 @@ int main(){
     fill_activation_sizes(model.activation_sizes, &model.config);
     alloc_activations(&model.activations, model.activation_sizes);
     Tokenizer tokenizer;
-    tokenizer_init(&tokenizer, "tokenizer.bin");
+    tokenizer.init("tokenizer.bin");
     
     Sampler sampler;
     build_sampler(&sampler, model.config.vocab_size, 0.7);
@@ -422,9 +460,7 @@ int main(){
     printf("-----------------------------\n");
     CHECK = false;
 
-    int tokens[] = {15496, 281, 261, 389, 34};
-    int num_tokens = sizeof(tokens) / sizeof(int);
-    int* gen_tokens = generate(&model, &tokenizer, 128, tokens, &sampler, num_tokens);
+    chat(&model, &tokenizer, &sampler);
 
     cublasDestroy(handle);
   

@@ -1,11 +1,11 @@
-CPU_SRC ?= model.c
+CPU_SRC ?= model.cpp
 CUDA_SRC ?= model.cu
 
 CC = g++
 CFLAGS = -march=native -ffast-math -O3 
 LDFLAGS = -lm -fopenmp
 
-NVCCFLAGS = -O3 --use_fast_math -Xcompiler -fopenmp
+NVCCFLAGS = -O3 --use_fast_math
 CUDA_LDFLAGS = -lcublas --expt-relaxed-constexpr
 
 EXECUTABLE = executable

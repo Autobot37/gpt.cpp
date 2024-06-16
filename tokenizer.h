@@ -1,85 +1,190 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <stdint.h>
-#include <ctype.h>
-#include <assert.h>
+#include <iostream>
+#include <fstream>
+#include <vector>
+#include <string>
+#include <unordered_map>
+#include <cctype>
+#include <cstring>
+using namespace std;
 #include "utils.h"
 
 #define MAX_KEY_LENGTH 100
 
-typedef struct {
-    int vocab_size;
-    char** token_table;
-    int eot_token;
-    unsigned char byte_pieces[512]; // stores all single-byte strings
-} Tokenizer;
-
-char* safe_printf(char* piece){
-    if (piece == NULL) { return NULL; }
-    if (piece[0] == '\0') { return NULL; }
-    if (piece[1] == '\0') {
-        unsigned char byte_val = piece[0];
-        if (!(isprint(byte_val) || isspace(byte_val))) {
-            return NULL; // bad byte, don't print it
+string safe_printf(const string& piece) {
+    if (piece.empty()) {
+        return ""; 
+    }
+    if (piece.length() == 1) {
+        unsigned char byte_val = static_cast<unsigned char>(piece[0]);
+        if (!isprint(byte_val) && !std::isspace(byte_val)) {
+            return ""; 
         }
     }
-    int piece_len = strlen(piece);
-    if(piece[piece_len-1] == '\n'){
-        piece[piece_len-1] = '\0';
+    string result = piece;
+    if (result.back() == '\n') {
+        result.pop_back();
+    }
+
+    return result;
+}
+
+struct Decoder{
+    int vocab_size;
+    vector<string> token_table;
+    int eot_token;
+    vector<string> byte_pieces; // stores all single-byte strings
+    Decoder();
+    void init(const char* filename);
+    string decode(int prev_token, int token);
+};
+Decoder::Decoder() {
+    byte_pieces.resize(256);
+    for (int i = 0; i < 256; i++) {
+        byte_pieces[i] = string(1, static_cast<char>(i));
+    }
+}
+
+
+void Decoder::init(const char* filename){
+    ifstream file(filename, ios::binary);
+    if(!file.is_open()){
+        cerr << "Error: Failed to open bin file: " << filename << endl;
+        exit(EXIT_FAILURE);
+    }
+    int header[256];
+    file.read((char*)header, 256*sizeof(int));
+    if(header[0] != 20240328){
+        cerr << "Error: Invalid bin file: " << filename << endl;
+        exit(EXIT_FAILURE);
+    }
+    vocab_size = header[2];
+    eot_token = header[3];
+
+    token_table.resize(vocab_size);
+    for(int i = 0;i<vocab_size;i++){
+        unsigned char length;
+        file.read((char*)&length, sizeof(unsigned char));
+        string token(length, '\0');
+        file.read(&token[0], length);
+        token_table[i] = token;
+    }
+    file.close();
+    printf("Decoder initialized\n");
+}
+
+string Decoder::decode(int prev_token, int token) {
+    string piece = token_table[token];
+    if (prev_token == 1 && piece[0] == ' ') {
+        piece.erase(0, 1);
+    }
+    unsigned char byte_val;
+    if (sscanf(piece.c_str(), "<0x%02hhX>", &byte_val) == 1) {
+        piece = byte_pieces[byte_val];
     }
     return piece;
 }
 
-void tokenizer_init(Tokenizer* tokenizer, const char* filename){
-    FILE *file = fopenCheck(filename, "rb");
-    int header[256];
-    freadCheck(header, sizeof(int), 256, file);
-    assert(header[0] == 20240328);
-    tokenizer->vocab_size = header[2];
-    tokenizer->eot_token = header[3];
+struct TrieNode {
+    unordered_map<char, TrieNode*> children;
+    int token_length = -1;
+    int token_id = -1;
+    char character;
 
-    for (int i = 0; i < 256; i++) {
-        tokenizer->byte_pieces[i * 2] = (unsigned char)i;
-        tokenizer->byte_pieces[i * 2 + 1] = '\0';
-    }
+    TrieNode(char c = '\0');
+    ~TrieNode();
+    void init(const vector<string>& tokens);
+    vector<int> encode(const string& prompt);
+};
 
-    unsigned char length;
-    tokenizer->token_table = (char**)mallocCheck(tokenizer->vocab_size * sizeof(char*));
-    for(uint32_t i=0;i<tokenizer->vocab_size;i++){
-        freadCheck(&length, sizeof(unsigned char), 1, file);
-        assert(length>0);
-        char* token_bytes = (char*)mallocCheck(length+1);
-        freadCheck(token_bytes, sizeof(char), length, file);
-        token_bytes[length] = '\0';
-        tokenizer->token_table[i] = token_bytes;
+TrieNode::TrieNode(char c) : character(c) {}
+
+TrieNode::~TrieNode() {
+    for (auto& child : children) {
+        delete child.second;
     }
-    fcloseCheck(file);
+}
+
+void TrieNode::init(const vector<string>& tokens) {
+    for (int i = 0; i < tokens.size(); i++) {
+        const string& token = tokens[i];
+        TrieNode* node = this;
+        for (char c : token) {
+            if (node->children.find(c) == node->children.end()) {
+                node->children[c] = new TrieNode(c);
+            }
+            node = node->children[c];
+        }
+        node->token_length = token.length();
+        node->token_id = i;
+    }
+    printf("TrieNode initialized\n");
+}
+
+vector<int> TrieNode::encode(const string& prompt) {
+    vector<int> encoded;
+    TrieNode* node = this;
+    int i = 0;
+    int last_token_id = -1;
+    while (i < prompt.length()) {
+        char key = prompt[i];
+        if (node->children.find(key) == node->children.end()) {
+            node = this;
+            encoded.push_back(last_token_id);
+            last_token_id = -1;
+        } else {
+            node = node->children[key];
+            if (node->token_id != -1) {
+                last_token_id = node->token_id;
+            }
+            i++;
+        }
+    }
+    encoded.push_back(last_token_id);
+    return encoded;
+}
+
+struct Tokenizer {
+    Decoder decoder;
+    TrieNode trie;
+    Tokenizer();
+    void init(const char* filename);
+    vector<int> encode(const string& prompt);
+    string decode(int prev_token, int token);
+};
+
+Tokenizer::Tokenizer() {
+    decoder = Decoder();
+    trie = TrieNode();
+}
+
+void Tokenizer::init(const char* filename) {
+    decoder.init(filename);
+    trie.init(decoder.token_table);
     printf("Tokenizer initialized\n");
 }
 
-char* tokenizer_decode(Tokenizer* t, int prev_token, int token) {
-    char *piece = t->token_table[token];
-    // following BOS (1) token, sentencepiece decoder strips any leading whitespace (see PR #89)
-    if (prev_token == 1 && piece[0] == ' ') { piece++; }
-    // careful, some tokens designate raw bytes, and look like e.g. '<0x01>'
-    // parse this and convert and return the actual byte
-    unsigned char byte_val;
-    if (sscanf(piece, "<0x%02hhX>", &byte_val) == 1) {
-        piece = (char*)t->byte_pieces + byte_val * 2;
-    }
-    return piece;
+vector<int> Tokenizer::encode(const string& prompt) {
+    return trie.encode(prompt);
+}
+
+string Tokenizer::decode(int prev_token, int token) {
+    return decoder.decode(prev_token, token);
 }
 
 // int main() {
     
 //     Tokenizer tokenizer;
-//     tokenizer_init(&tokenizer, "tokenizer.bin");
-//     int token;
-//     while(scanf("%d", &token) == 1){
-//         const char* piece = tokenizer_decode(&tokenizer, token);
-//         safe_printf(piece);
-//         printf("\n");
+//     tokenizer.init("tokenizer.bin");
+//     string prompt = "Hello, world!";
+//     vector<int> encoded = tokenizer.encode(prompt);
+//     int prev_token = -1;
+//     for (int token : encoded) {
+//         string piece = tokenizer.decode(prev_token, token);
+//         piece = safe_printf(piece);
+//         printf("%s", piece.c_str());
+//         prev_token = token;
 //     }
+    
+
 //     return 0;
 // }

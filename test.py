@@ -21,3 +21,4 @@ print(tokens_hf.shape, tokens_hf)
 print(tokens_custom.shape, tokens_custom)
 
 assert torch.all(tokens_hf == tokens_custom), "Models do not match" 
+print("All tests passed!")

@@ -18,24 +18,6 @@ void matmul(float* out, float* in, float* w, float* b, int N ,int D){
     } 
 }
 
-__global__
-void matmul_kernel(float* out, float* in, float* w, float* b, int N ,int D){
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if(i < N){
-        float sum = (b!=NULL) ? b[i] : 0;
-        for(int j = 0;j<D;j++){
-            sum += in[j] * w[i*D + j];
-        }
-        out[i] = sum;
-    }
-}
-
-void matmul_gpu(float* out, float* in, float* w, float* b, int N ,int D){
-    int num_threads = 1024;
-    int num_blocks = (N + num_threads - 1) / num_threads;
-    matmul_kernel<<<num_blocks, num_threads>>>(out, in, w, b, N, D);
-}
-
 __global__ void add_bias(float* out, float* b, int N){
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if(i < N){
@@ -56,8 +38,7 @@ void gemm(float* out, float* in, float* w, float* b, int N, int D) {
         printf("cublasSgemv failed\n");
     }
     if(b != NULL)
-    add_bias<<<(N + 1023) / 1024, 1024>>>(out, b, N);
-
+    add_bias<<<(N + 256) / 256, 256>>>(out, b, N);
 }
 
 void rand_init(float* arr, int N){
@@ -84,7 +65,7 @@ int main(){
     cublasCreate(&handle);
 
     int N = 1024;
-    int D = 2048;
+    int D = 4096;
 
     float* in = (float*)malloc(D * sizeof(float));
     float* w = (float*)malloc(N * D * sizeof(float));
@@ -105,24 +86,15 @@ int main(){
     cudaMemcpy(d_w, w, N * D * sizeof(float), cudaMemcpyHostToDevice);
     cudaMemcpy(d_b, b, N * sizeof(float), cudaMemcpyHostToDevice);
 
-    matmul(out, in, w, b, N, D);
-
-    matmul_gpu(d_out, d_in, d_w, d_b, N, D);
+    for(int i = 0;i<1024;i++){
+        matmul(out, in, w, b, N, D);
+        gemm(d_out, d_in, d_w, d_b, N, D);
+    }
 
     float* out_gpu = (float*)malloc(N * sizeof(float));
     cudaMemcpy(out_gpu, d_out, N * sizeof(float), cudaMemcpyDeviceToHost);
 
     isequal(out, out_gpu, N);
-
-    //----sgemm
-    float* out_gemm;
-    cudaMalloc(&out_gemm, N * sizeof(float));
-    gemm(out_gemm, d_in, d_w, d_b, N, D);
-
-    float* out_gemm_cpu = (float*)malloc(N * sizeof(float));
-    cudaMemcpy(out_gemm_cpu, out_gemm, N * sizeof(float), cudaMemcpyDeviceToHost);
-
-    isequal(out, out_gemm_cpu, N);
 
     cublasDestroy(handle);
 
