@@ -19,6 +19,18 @@ void print(float* x, int N){
     printf("\n");
     printf("----------------------\n");
 }
+void isequal(float* a, float* b, int n){
+    float maxval = -INFINITY;
+    for(int i = 0;i<n;i++){
+        maxval = fmaxf(maxval, fmaxf(a[i], b[i]));
+    }
+    float eps = 1e-4;
+    for(int i = 0;i<n;i++){
+        if(fabs(a[i] - b[i]) > eps * (maxval + 1)){
+            printf("Mismatch at index %d CPU: %.6f GPU: %.6f\n", i, a[i], b[i]);
+        }
+    }
+}
 
 typedef struct {
     int vocab_size;
@@ -30,15 +42,16 @@ void build_sampler(Sampler* sampler, int vocab_size, float temprature){
     sampler->temprature = temprature;
 }
 
-int sample_multi(float* probabilities, int n, float coin){
-    float cdf = 0.0f;
-    for(int i = 0;i<n;i++){
-        cdf += probabilities[i];
-        if(cdf > coin){
-            return i;
+int sample_argmax(float* probabilities, int n){
+    int max_idx = 0;
+    float max_val = probabilities[0];
+    for(int i = 1;i<n;i++){
+        if(probabilities[i] > max_val){
+            max_val = probabilities[i];
+            max_idx = i;
         }
     }
-    return n-1;
+    return max_idx;
 }
 
 int sample(Sampler* sampler, float* logits){
@@ -47,8 +60,7 @@ int sample(Sampler* sampler, float* logits){
         logits[i] /= sampler->temprature;
     }
     softmax(logits, sampler->vocab_size);
-    float coin = (float)rand() / RAND_MAX;
-    next = sample_multi(logits, sampler->vocab_size, coin);
+    next = sample_argmax(logits, sampler->vocab_size);
     return next;
 }
 
@@ -283,18 +295,21 @@ float* forward(Model* model, int token, int pos){
     return a->logits;
 }
 
-void generate(Model* model, Tokenizer* tokenizer, int max_tokens, int* tokens, Sampler* sampler, int num_tokens){
+int* generate(Model* model, Tokenizer* tokenizer, int max_tokens, int* tokens, Sampler* sampler, int num_tokens){
+    int* generated_tokens = (int*)malloc((max_tokens + num_tokens) * sizeof(int));
 
     int token = tokens[0];
     int pos = 0;
     int next;
-    printf("Number of tokens: %d\n", num_tokens);
+    // printf("Number of tokens: %d\n", num_tokens);
 
     clock_t start, end;
     start = clock();
     float* logits;
-
-    while(pos < max_tokens){
+    // printf("Generating tokens: \n");
+    // printf("%d ", token);
+    generated_tokens[pos] = token;
+    while(pos < max_tokens + num_tokens - 1){
         float* logits = forward(model, token, pos);
         if(pos < num_tokens - 1){
             next = tokens[pos + 1];
@@ -303,26 +318,56 @@ void generate(Model* model, Tokenizer* tokenizer, int max_tokens, int* tokens, S
             next = sample(sampler, logits);
         }
         pos++;
-        char* piece = tokenizer_decode(tokenizer, token, next);
-        piece = safe_printf(piece);
         token = next;
-        if(token == tokenizer->eot_token){
-            printf("\n");
-            continue;
-        }
-        if(piece == NULL){
-            continue;
-        }
-        else{
-            printf("%s", piece);
-            fflush(stdout);
-        }
+        // printf(" %d ", token);
+        // fflush(stdout);
+        generated_tokens[pos] = token;
     }
     printf("\n");
     end = clock();
     double time_taken = ((double)end - start) / CLOCKS_PER_SEC;
     double one_token = (time_taken / max_tokens) * 1000;
     printf("One token took %.6f ms\n", one_token);
+
+    return generated_tokens;
+}
+
+void check_output(char* path, Model* model, Sampler* sampler, Tokenizer* tokenizer){
+    FILE* file = fopen(path, "r");
+    if(file == NULL){
+        printf("Error opening file\n");
+        exit(1);
+    }
+    int header[8];
+    size_t ret = fread(header, sizeof(int), 8, file);
+    if(header[0] != 3737){
+        printf("Invalid file\n");
+        exit(1);
+    }
+    int vocab_size = header[1];
+    int max_length = header[2];
+    int num_tokens = header[3];
+
+    int file_tokens[num_tokens];
+    size_t num_read = fread(file_tokens, sizeof(int), num_tokens, file);
+    if(num_read != num_tokens){
+        printf("Invalid number of tokens\n");
+        exit(1);
+    }
+
+    int file_next_tokens[max_length + num_tokens];
+    size_t length = fread(file_next_tokens, sizeof(int), max_length, file);
+    if(length != max_length){
+        printf("Invalid number of tokens\n");
+        exit(1);
+    }
+    fclose(file);
+
+    int* gen_tokens = generate(model, tokenizer, max_length, file_tokens, sampler, num_tokens);
+    for(int i = 0;i<max_length;i++){
+        assert(gen_tokens[i] == file_next_tokens[i]);
+    }
+    printf("Checked output\n");
 }
 
 
@@ -337,10 +382,10 @@ int main(){
     tokenizer_init(&tokenizer, "tokenizer.bin");
 
     Sampler sampler;
-    build_sampler(&sampler, model.config.vocab_size, 0.7);
+    build_sampler(&sampler, model.config.vocab_size, 1.0);
     
-    int tokens[] = {18927, 318, 2642, 11, 3387, 3613, 502};
-    generate(&model, &tokenizer, 128, tokens, &sampler, 3);
+    check_output("debug.bin", &model, &sampler, &tokenizer);
+   
 
     return 0;
 

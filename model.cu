@@ -66,6 +66,17 @@ int sample_multi(float* probabilities, int n, float coin){
     }
     return n-1;
 }
+int sample_argmax(float* probabilities, int n){
+    int max_idx = 0;
+    float max_val = -FLT_MAX;
+    for(int i = 0;i<n;i++){
+        if(probabilities[i] > max_val){
+            max_val = probabilities[i];
+            max_idx = i;
+        }
+    }
+    return max_idx;
+}
 
 int sample(Sampler* sampler, float* logits){
     int next;
@@ -74,7 +85,7 @@ int sample(Sampler* sampler, float* logits){
     }
     softmax(logits, sampler->vocab_size);
     float coin = (float)rand() / RAND_MAX;
-    next = sample_multi(logits, sampler->vocab_size, coin);
+    next = sample_argmax(logits, sampler->vocab_size);
     return next;
 }
 
@@ -306,48 +317,82 @@ float* forward(Model* model, int token, int pos){
     return a->logits;
 }
 
-void generate(Model* model, Tokenizer* tokenizer, int max_tokens, int* tokens, Sampler* sampler, int num_tokens){
+int* generate(Model* model, Tokenizer* tokenizer, int max_tokens, int* tokens, Sampler* sampler, int num_tokens){
+    int* generated_tokens = (int*)malloc((max_tokens + num_tokens) * sizeof(int));
+    float* logits = (float*)malloc(model->config.vocab_size * sizeof(float));
 
     int token = tokens[0];
     int pos = 0;
     int next;
-    float* logits_cpu = (float*)malloc(model->config.vocab_size * sizeof(float));
+    // printf("Number of tokens: %d\n", num_tokens);
 
     clock_t start, end;
     start = clock();
-    float* logits;
+    // printf("Generating tokens: \n");
+    // printf("%d ", token);
+    generated_tokens[pos] = token;
+    while(pos < max_tokens + num_tokens - 1){
+        float* gpu_logits = forward(model, token, pos);
+        cudaCheck(cudaMemcpy(logits, gpu_logits, model->config.vocab_size * sizeof(float), cudaMemcpyDeviceToHost));
 
-    printf("%s", tokenizer_decode(tokenizer, token, token));
-    fflush(stdout);
-    while(pos < max_tokens){
-        float* logits = forward(model, token, pos);
         if(pos < num_tokens - 1){
             next = tokens[pos + 1];
         }
         else{
-            cudaMemcpy(logits_cpu, logits, model->config.vocab_size * sizeof(float), cudaMemcpyDeviceToHost);
-            next = sample(sampler, logits_cpu);
+            next = sample(sampler, logits);
         }
         pos++;
-        char* piece = tokenizer_decode(tokenizer, token, next);
-        piece = safe_printf(piece);
         token = next;
-        if(piece == NULL){
-            continue;
-        }
-        else{
-            printf("%s", piece);
-            fflush(stdout);
-        }
+        // printf(" %d ", token);
+        // fflush(stdout);
+        generated_tokens[pos] = token;
     }
     printf("\n");
-    cudaDeviceSynchronize();
     end = clock();
     double time_taken = ((double)end - start) / CLOCKS_PER_SEC;
     double one_token = (time_taken / max_tokens) * 1000;
     printf("One token took %.6f ms\n", one_token);
+
+    return generated_tokens;
 }
 
+void check_output(char* path, Model* model, Sampler* sampler, Tokenizer* tokenizer){
+    FILE* file = fopen(path, "r");
+    if(file == NULL){
+        printf("Error opening file\n");
+        exit(1);
+    }
+    int header[8];
+    size_t ret = fread(header, sizeof(int), 8, file);
+    if(header[0] != 3737){
+        printf("Invalid file\n");
+        exit(1);
+    }
+    int vocab_size = header[1];
+    int max_length = header[2];
+    int num_tokens = header[3];
+
+    int file_tokens[num_tokens];
+    size_t num_read = fread(file_tokens, sizeof(int), num_tokens, file);
+    if(num_read != num_tokens){
+        printf("Invalid number of tokens\n");
+        exit(1);
+    }
+
+    int file_next_tokens[max_length + num_tokens];
+    size_t length = fread(file_next_tokens, sizeof(int), max_length, file);
+    if(length != max_length){
+        printf("Invalid number of tokens\n");
+        exit(1);
+    }
+    fclose(file);
+
+    int* gen_tokens = generate(model, tokenizer, max_length, file_tokens, sampler, num_tokens);
+    for(int i = 0;i<max_length;i++){
+        assert(gen_tokens[i] == file_next_tokens[i]);
+    }
+    printf("Checked output\n");
+}
 
 int main(){
 
@@ -364,9 +409,8 @@ int main(){
     Sampler sampler;
     build_sampler(&sampler, model.config.vocab_size, 0.7);
     
-    int tokens[] = {198, 15047, 768, 1982, 32466, 11, 262, 2266, 3234, 7718, 5863, 329, 465, 2866, 290, 45581, 11, 1043, 2241, 379, 257, 3272, 21372, 13, 2293, 257, 2168, 286, 1029, 12, 32540, 9558, 290, 12184, 7864, 11, 339, 614, 2817, 329, 1223, 517, 13, 383, 28576, 286, 11717, 645, 2392, 2921, 683, 262, 976, 10484, 340, 1752, 750, 13, 198, 3198, 1110, 11, 981, 44339, 832, 5325, 38585, 18334, 11, 339, 6810, 257, 1448, 286, 1862, 5006, 18207, 511, 5059, 4678, 13, 45827, 416, 511, 17131, 11, 1982, 32466, 3066, 284, 2648, 465, 3725, 290, 1998, 351, 262, 1306, 5270, 13, 679, 4721, 262, 12469, 1982, 32466, 14954, 8581, 11, 7256, 284, 3047, 31483, 3444, 364, 13, 198};
-    int num_tokens = sizeof(tokens) / sizeof(int);
-    generate(&model, &tokenizer, 512, tokens, &sampler, num_tokens);
+    check_output("debug.bin", &model, &sampler, &tokenizer);
+
     cublasDestroy(handle);
   
     return 0;

@@ -32,5 +32,8 @@ jobs:
             - name: Init Weights
               run: python3 pythonscripts/model.py
             
+            - name: Test python
+              run: test.py
+            
             - name: Compile and run
               run: make run_cpu && ./executable

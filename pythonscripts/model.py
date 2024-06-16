@@ -129,28 +129,43 @@ class GPT(nn.Module):
             loss = None
         return logits, loss
 
-    @staticmethod
-    def from_pretrained(model_type):
-        assert model_type in {'gpt2', 'gpt2-medium','gpt2-large','gpt2-xl'}
+    @classmethod
+    def from_pretrained(cls, model_type):
+        assert model_type in {'gpt2', 'gpt2-medium', 'gpt2-large', 'gpt2-xl'}
         from transformers import GPT2LMHeadModel
+        model_hf = GPT2LMHeadModel.from_pretrained(model_type)
+        if model_hf.config.n_layer == 12 and model_hf.config.n_head == 12 and model_hf.config.n_embd == 768:
+            model_type = 'gpt2'
+        elif model_hf.config.n_layer == 24 and model_hf.config.n_head == 16 and model_hf.config.n_embd == 1024:
+            model_type = 'gpt2-medium'
+        elif model_hf.config.n_layer == 36 and model_hf.config.n_head == 20 and model_hf.config.n_embd == 1280:
+            model_type = 'gpt2-large'
+        elif model_hf.config.n_layer == 48 and model_hf.config.n_head == 25 and model_hf.config.n_embd == 1600:
+            model_type = 'gpt2-xl'
+
+        print("loading weights from pretrained gpt: %s" % model_type)
+
         config_args = {
             'gpt2':         dict(n_layer=12, n_head=12, n_embd=768),  # 124M params
             'gpt2-medium':  dict(n_layer=24, n_head=16, n_embd=1024), # 350M params
             'gpt2-large':   dict(n_layer=36, n_head=20, n_embd=1280), # 774M params
             'gpt2-xl':      dict(n_layer=48, n_head=25, n_embd=1600), # 1558M params
         }[model_type]
-        config_args["vocab_size"] = 50257
-        config_args["block_size"] = 1024
-        config =  GPTConfig(**config_args)
+        config_args['vocab_size'] = 50257 
+        config_args['block_size'] = 1024 
+        config = GPTConfig(**config_args)
         model = GPT(config)
         sd = model.state_dict()
         sd_keys = sd.keys()
-        sd_keys = [k for k in sd_keys if not k.endswith('.attn.bias')]
-        model_hf = GPT2LMHeadModel.from_pretrained(model_type)
+        sd_keys = [k for k in sd_keys if not k.endswith('.attn.bias')] 
+
         sd_hf = model_hf.state_dict()
+
         sd_keys_hf = sd_hf.keys()
-        transposed = ['attn.c_attn.weight', 'mlp.c_fc.weight', 'mlp.c_proj.weight']
-        assert len(sd_keys_hf) == len(sd_keys)
+        sd_keys_hf = [k for k in sd_keys_hf if not k.endswith('.attn.masked_bias')]
+        sd_keys_hf = [k for k in sd_keys_hf if not k.endswith('.attn.bias')] 
+        transposed = ['attn.c_attn.weight', 'attn.c_proj.weight', 'mlp.c_fc.weight', 'mlp.c_proj.weight']
+        assert len(sd_keys_hf) == len(sd_keys), f"mismatched keys: {len(sd_keys_hf)} != {len(sd_keys)}"
         for k in sd_keys_hf:
             if any(k.endswith(w) for w in transposed):
                 assert sd_hf[k].shape[::-1] == sd[k].shape
@@ -164,16 +179,14 @@ class GPT(nn.Module):
 
     @torch.no_grad()
     def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None):
-        for _ in range(max_new_tokens):
-            idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:,-self.config.block_size:]
-            logits,_ = self(idx_cond)
-            logits = logits[:, -1 ,:] / temperature
-            if top_k is not None:
-                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
-                logits[logits < v[:, [-1]]] = -float('inf')
-            probs = F.softmax(logits,dim=-1)
-            idx_next = torch.multinomial(probs, num_samples=1)
-            idx = torch.cat((idx,idx_next), dim=-1)
+        assert max_new_tokens - idx.size(1) >0, "No new tokens to generate"
+        for _ in range(max_new_tokens - idx.size(1)):
+            idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
+            logits, _ = self(idx_cond)
+            logits = logits[:, -1, :] / temperature
+            probs = F.softmax(logits, dim=-1)
+            idx_next = torch.argmax(probs, dim=-1, keepdim=True)
+            idx = torch.cat((idx, idx_next), dim=1)
         return idx
 
 
@@ -248,22 +261,36 @@ def write_tokenizer(enc, filename):
             file.write(b)  # Write the actual bytes
     print(f"wrote {filename}")
 
+def write_state(model, path):
+    header = torch.zeros(8, dtype=torch.int32)
+    header[0] = 3737
+    header[1] = model.config.vocab_size
+    header[2] = max_length = 128
+    header[3] = num_tokens = 32
+
+    tokens = torch.randint(0, model.config.vocab_size, (1, num_tokens), dtype=torch.int32)
+    next_tokens = model.generate(tokens, max_length)[0].to(torch.int32)
+    print(next_tokens.shape)
+    print(tokens.shape)
+    next_tokens = next_tokens.cpu().numpy()
+    tokens = tokens[0].cpu().numpy()
+    print(next_tokens)
+    print(tokens)
+    with open(path, "wb") as f:
+        f.write(header.numpy().tobytes())
+        f.write(tokens.tobytes())
+        f.write(next_tokens.tobytes())
+    print(f"wrote {path}")
+
+device = "cpu" if not torch.cuda.is_available() else "cuda"
+
 import tiktoken
 enc = tiktoken.get_encoding("gpt2")
-text = """
-Lightning McQueen, the red racecar famous for his speed and charisma, found himself at a crossroads. After a series of high-stakes races and championship wins, he yearned for something more. The thrill of racing no longer gave him the same rush it once did.
-One day, while cruising through Radiator Springs, he noticed a group of young cars practicing their driving skills. Inspired by their enthusiasm, McQueen decided to share his knowledge and experience with the next generation. He opened the Lightning McQueen Racing Academy, dedicated to training aspiring racers.
-"""
-encoded = enc.encode(text)
-# print(encoded)
 write_tokenizer(enc, "tokenizer.bin")
 
 model = GPT.from_pretrained('gpt2')
 params_path = "params.bin"
 write_model(model, params_path)
-model = model.to("cuda")
-encoded = torch.tensor(encoded, device="cuda", dtype=torch.int32).unsqueeze(0)
-next = model.generate(encoded, 512)
-print(next)
-decoded = enc.decode(next[0].tolist())
-print(decoded)
+
+debug_path = "debug.bin"
+write_state(model, debug_path)
