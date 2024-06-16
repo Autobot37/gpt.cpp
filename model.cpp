@@ -446,7 +446,7 @@ int main(){
     printf("-----------------------------\n");
     CHECK = false;
 
-    chat(&model, &tokenizer, &sampler);
+    completion(&model, &tokenizer, &sampler, "The quick brown fox", 128);
 
     return 0;
 

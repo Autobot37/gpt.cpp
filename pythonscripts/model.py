@@ -342,7 +342,7 @@ import tiktoken
 enc = tiktoken.get_encoding("gpt2")
 write_tokenizer(enc, "tokenizer.bin")
 
-model = GPT.from_pretrained('singhshiva/kaggle')
+model = GPT.from_pretrained('gpt2-medium')
 params_path = "params.bin"
 write_model(model, params_path)
 
@@ -350,11 +350,11 @@ debug_path = "debug.bin"
 write_state(model, debug_path)
 
 #//-----------------------------------------------------------------------------
-model = model.to(device)
-encoded = enc.encode("Hello anon are you")
-print(encoded)
-tokens = torch.tensor(encoded, dtype=torch.int32).unsqueeze(0).to(device)
-gen = model.generate(tokens, max_new_tokens=128, temperature=0.75)
-print(gen)
-decoded = enc.decode(gen[0].cpu().numpy())
-print(decoded)
+# model = model.to(device)
+# encoded = enc.encode("Hello anon are you")
+# print(encoded)
+# tokens = torch.tensor(encoded, dtype=torch.int32).unsqueeze(0).to(device)
+# gen = model.generate(tokens, max_new_tokens=128, temperature=0.75)
+# print(gen)
+# decoded = enc.decode(gen[0].cpu().numpy())
+# print(decoded)
