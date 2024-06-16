@@ -10,7 +10,6 @@ import torch.nn.functional as F
 
 #-----------------------------------------------------------------------------
 import tiktoken
-from anytree import Node, RenderTree
 
 enc = tiktoken.get_encoding("gpt2")
 prompt = "am i dreamin is there more like us?"
@@ -58,18 +57,7 @@ class TrieNode:
                 last_token_id = node.token_id
             i += 1
         encoded.append(last_token_id)
-        return encoded
-    
-    def create_tree(self):
-        self.node = Node(self.char)
-        for char, child in self.children.items():
-            child_node = child.create_tree()
-            child_node.parent = self.node
-        return self.node
-
-    def print_tree(self):
-        root_node = self.create_tree()
-        print(RenderTree(root_node))            
+        return encoded          
 #//-----------------------------------------------------------------------------
 
 @dataclass
