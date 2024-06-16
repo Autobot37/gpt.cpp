@@ -131,7 +131,6 @@ class GPT(nn.Module):
 
     @classmethod
     def from_pretrained(cls, model_type):
-        assert model_type in {'gpt2', 'gpt2-medium', 'gpt2-large', 'gpt2-xl'}
         from transformers import GPT2LMHeadModel
         model_hf = GPT2LMHeadModel.from_pretrained(model_type)
         if model_hf.config.n_layer == 12 and model_hf.config.n_head == 12 and model_hf.config.n_embd == 768:
@@ -142,6 +141,8 @@ class GPT(nn.Module):
             model_type = 'gpt2-large'
         elif model_hf.config.n_layer == 48 and model_hf.config.n_head == 25 and model_hf.config.n_embd == 1600:
             model_type = 'gpt2-xl'
+        assert model_type in {'gpt2', 'gpt2-medium', 'gpt2-large', 'gpt2-xl'}
+
 
         print("loading weights from pretrained gpt: %s" % model_type)
 
@@ -178,14 +179,14 @@ class GPT(nn.Module):
         return model
 
     @torch.no_grad()
-    def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None):
+    def generate(self, idx, max_new_tokens, temperature=1.0, check=False):
         assert max_new_tokens - idx.size(1) >0, "No new tokens to generate"
         for _ in range(max_new_tokens - idx.size(1)):
             idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
             logits, _ = self(idx_cond)
             logits = logits[:, -1, :] / temperature
             probs = F.softmax(logits, dim=-1)
-            idx_next = torch.argmax(probs, dim=-1, keepdim=True)
+            idx_next = torch.multinomial(probs, num_samples=1) if check is False else torch.argmax(probs, dim=-1, keepdim=True)
             idx = torch.cat((idx, idx_next), dim=1)
         return idx
 
@@ -269,7 +270,7 @@ def write_state(model, path):
     header[3] = num_tokens = 32
 
     tokens = torch.randint(0, model.config.vocab_size, (1, num_tokens), dtype=torch.int32)
-    next_tokens = model.generate(tokens, max_length)[0].to(torch.int32)
+    next_tokens = model.generate(tokens, max_length, check=True)[0].to(torch.int32)
     print(next_tokens.shape)
     print(tokens.shape)
     next_tokens = next_tokens.cpu().numpy()
@@ -288,9 +289,19 @@ import tiktoken
 enc = tiktoken.get_encoding("gpt2")
 write_tokenizer(enc, "tokenizer.bin")
 
-model = GPT.from_pretrained('gpt2')
+model = GPT.from_pretrained('singhshiva/kaggle')
 params_path = "params.bin"
 write_model(model, params_path)
 
 debug_path = "debug.bin"
 write_state(model, debug_path)
+
+#//-----------------------------------------------------------------------------
+model = model.to(device)
+encoded = enc.encode("Hello anon are you")
+print(encoded)
+tokens = torch.tensor(encoded, dtype=torch.int32).unsqueeze(0).to(device)
+gen = model.generate(tokens, max_new_tokens=128, temperature=0.75)
+print(gen)
+decoded = enc.decode(gen[0].cpu().numpy())
+print(decoded)

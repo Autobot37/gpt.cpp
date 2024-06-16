@@ -45,6 +45,7 @@ void cudaCheck(cudaError_t error, const char *file, int line) {
 };
 #define cudaCheck(err) (cudaCheck(err, __FILE__, __LINE__))
 
+bool CHECK = false;
 
 typedef struct {
     int vocab_size;
@@ -85,7 +86,12 @@ int sample(Sampler* sampler, float* logits){
     }
     softmax(logits, sampler->vocab_size);
     float coin = (float)rand() / RAND_MAX;
-    next = sample_argmax(logits, sampler->vocab_size);
+    if(CHECK){
+        next = sample_argmax(logits, sampler->vocab_size);
+    }
+    else{
+        next = sample_multi(logits, sampler->vocab_size, coin);
+    }
     return next;
 }
 
@@ -324,12 +330,10 @@ int* generate(Model* model, Tokenizer* tokenizer, int max_tokens, int* tokens, S
     int token = tokens[0];
     int pos = 0;
     int next;
-    // printf("Number of tokens: %d\n", num_tokens);
 
     clock_t start, end;
     start = clock();
-    // printf("Generating tokens: \n");
-    // printf("%d ", token);
+    if(!CHECK)printf("%d ", token);
     generated_tokens[pos] = token;
     while(pos < max_tokens + num_tokens - 1){
         float* gpu_logits = forward(model, token, pos);
@@ -343,8 +347,11 @@ int* generate(Model* model, Tokenizer* tokenizer, int max_tokens, int* tokens, S
         }
         pos++;
         token = next;
-        // printf(" %d ", token);
-        // fflush(stdout);
+        // printf(" %d", token);
+        char* piece = tokenizer_decode(tokenizer, next, token);
+        piece = safe_printf(piece);
+        if(!CHECK)printf("%s", piece);
+        fflush(stdout);
         generated_tokens[pos] = token;
     }
     printf("\n");
@@ -391,10 +398,11 @@ void check_output(char* path, Model* model, Sampler* sampler, Tokenizer* tokeniz
     for(int i = 0;i<max_length;i++){
         assert(gen_tokens[i] == file_next_tokens[i]);
     }
-    printf("Checked output\n");
 }
 
 int main(){
+
+    srand(time(NULL));
 
     cublasCreate(&handle);
 
@@ -408,8 +416,15 @@ int main(){
     
     Sampler sampler;
     build_sampler(&sampler, model.config.vocab_size, 0.7);
-    
+    CHECK = true;
     check_output("debug.bin", &model, &sampler, &tokenizer);
+    printf("All tests passed\n");
+    printf("-----------------------------\n");
+    CHECK = false;
+
+    int tokens[] = {15496, 281, 261, 389, 34};
+    int num_tokens = sizeof(tokens) / sizeof(int);
+    int* gen_tokens = generate(&model, &tokenizer, 128, tokens, &sampler, num_tokens);
 
     cublasDestroy(handle);
   

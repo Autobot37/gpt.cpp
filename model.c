@@ -301,13 +301,13 @@ int* generate(Model* model, Tokenizer* tokenizer, int max_tokens, int* tokens, S
     int token = tokens[0];
     int pos = 0;
     int next;
-    // printf("Number of tokens: %d\n", num_tokens);
+    printf("Number of tokens: %d\n", num_tokens);
 
     clock_t start, end;
     start = clock();
     float* logits;
-    // printf("Generating tokens: \n");
-    // printf("%d ", token);
+    printf("Generating tokens: \n");
+    printf("%d ", token);
     generated_tokens[pos] = token;
     while(pos < max_tokens + num_tokens - 1){
         float* logits = forward(model, token, pos);
@@ -319,8 +319,8 @@ int* generate(Model* model, Tokenizer* tokenizer, int max_tokens, int* tokens, S
         }
         pos++;
         token = next;
-        // printf(" %d ", token);
-        // fflush(stdout);
+        printf(" %d ", token);
+        fflush(stdout);
         generated_tokens[pos] = token;
     }
     printf("\n");
@@ -367,7 +367,6 @@ void check_output(char* path, Model* model, Sampler* sampler, Tokenizer* tokeniz
     for(int i = 0;i<max_length;i++){
         assert(gen_tokens[i] == file_next_tokens[i]);
     }
-    printf("Checked output\n");
 }
 
 
@@ -385,7 +384,8 @@ int main(){
     build_sampler(&sampler, model.config.vocab_size, 1.0);
     
     check_output("debug.bin", &model, &sampler, &tokenizer);
-   
+    printf("All tests passed\n");
+    printf("-----------------------------\n");
 
     return 0;
 

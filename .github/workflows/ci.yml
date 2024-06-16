@@ -33,7 +33,7 @@ jobs:
               run: python3 pythonscripts/model.py
             
             - name: Test python
-              run: test.py
+              run: python3 test.py
             
             - name: Compile and run
               run: make run_cpu && ./executable
