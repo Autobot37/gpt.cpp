@@ -8,6 +8,7 @@ Global structure is based on karpathy llm.c inference only implementation + addi
 - Separate Optimized kernels for Cuda and Cpu.
 - KV Cache.
 - Byte Pair Encoding with Trie.
+- Python, C and CUDA test to ensure same output between huggingface - custommodel - c file - CUDA file. 
 
 # Todo
 - Optimizing Attention_forward kernel.
