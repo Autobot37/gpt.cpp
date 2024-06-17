@@ -33,6 +33,3 @@ make run_cpu
 - Ubuntu 22.04
 - Cuda 11.8
 
-# System Tested
-- Ubuntu 22.04
-- Cuda 11.8
