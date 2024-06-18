@@ -144,33 +144,6 @@ void unfill_cache(float* cache, float* arr, int l, int pos, int C, int NH, int T
         arr[to] = cache_l[from];
     }
 }
-__global__
-void softmax_kernel(float* x, int T, int NH, int pos){
-    int idx = threadIdx.x;
-    if(idx < NH){
-        float* xh = x + idx * T;
-        float max = xh[0];
-        for(int t = 1;t<pos;t++){
-            if(xh[t] > max){
-                max = xh[t];
-            }
-        }
-        float sum = 0;
-        for(int t = 0;t<pos;t++){
-            xh[t] = exp(xh[t] - max);
-            sum += xh[t];
-        }
-        for(int t = 0;t<T;t++){
-            if(t<pos){
-                xh[t] /= sum;
-            }
-            else{
-                xh[t] = 0;
-            }
-        }
-    }
-}
-
 __global__ 
 void softmax_kernel2(float* x, int T, int NH, int pos, float scale){
     //requires launch <<<NH, 1024>>>
@@ -200,7 +173,7 @@ void softmax_kernel2(float* x, int T, int NH, int pos, float scale){
     float maxval = row_max[0];
     
     for(int i = idx;i<pos;i+=blockDim.x){
-        x[row * T + i] = exp(x[row * T + i] - maxval);
+        x[row * T + i] = expf(x[row * T + i] - maxval);
         row_sum[idx] += x[row * T + i];
     }
     __syncthreads();
@@ -220,6 +193,80 @@ void softmax_kernel2(float* x, int T, int NH, int pos, float scale){
         else{
             x[row * T + i] = 0;
         }
+    }
+}
+
+__device__ float warpReduceMax(float val){
+    for(int offset = 16; offset > 0; offset /= 2){
+        val = fmaxf(val, __shfl_down_sync(0xFFFFFFFF, val, offset));
+    }
+    return val;
+}
+__device__ float warpReduceSum(float val){
+    for(int offset = 16; offset > 0; offset /= 2){
+        val += __shfl_down_sync(0xFFFFFFFF, val, offset);
+    }
+    return val;
+}
+
+__global__
+void softmax_kernel3(float* x, int T, int NH, int pos, float scale){
+    int idx = blockIdx.x;
+    int tid = threadIdx.x;
+    int warpId = tid / 32;
+    int laneId = tid % 32;
+
+    int warpsPerBlock = blockDim.x / 32;
+
+    extern __shared__ float shared[];
+    float* maxvals = shared;
+    float* sumvals = &shared[warpsPerBlock];
+
+    float* x_h = x + idx * T;
+    float maxval = -FLT_MAX;
+    for(int i= tid;i<pos;i+=blockDim.x){
+        x_h[i] *= scale;
+        maxval = fmaxf(maxval, x_h[i]);
+    }
+    maxval = warpReduceMax(maxval);
+    if(laneId == 0){
+        maxvals[warpId] = maxval;
+    }
+    __syncthreads();
+    if(tid==0){
+        float val = -FLT_MAX;
+        for(int i = 0;i<warpsPerBlock;i++){
+            val = fmaxf(val, maxvals[i]);
+        }
+        maxvals[0] = val;
+    }
+    __syncthreads();
+    float offset = maxvals[0];
+
+    for(int i = tid;i<pos;i+=blockDim.x){
+        x_h[i] = expf(x_h[i] - offset);
+    }
+    //sum
+    float sumval = 0.0f;
+    for(int i = tid;i<pos;i+=blockDim.x){
+        sumval += x_h[i];
+    }
+    sumval = warpReduceSum(sumval);
+    if(laneId == 0){
+        sumvals[warpId] = sumval;
+    }
+    __syncthreads();
+    if(tid==0){
+        float val = 0;
+        for(int i = 0;i<warpsPerBlock;i++){
+            val += sumvals[i];
+        }
+        sumvals[0] = val;
+    }
+    __syncthreads();
+    float sum = sumvals[0];
+    for(int i = tid;i<T;i+=blockDim.x){
+        x_h[i] = (i<pos) ? x_h[i] / sum : 0;
     }
 }
 
@@ -244,7 +291,8 @@ void attention_gpu(float* out, float* att, float* qkv, float* key_cache, float* 
         cout << "CUBLAS error" << endl;
     }
     float scale = 1.0 / sqrt(head_size);    
-    softmax_kernel2<<<NH, 1024>>>(att, T, NH, pos+1, scale);
+    size_t memory = 2 * 1024 * sizeof(float) / 32;
+    softmax_kernel3<<<NH, 1024, memory>>>(att, T, NH, pos+1, scale);
 
     status = cublasSgemmStridedBatched(handle, CUBLAS_OP_N, CUBLAS_OP_N, head_size, 1, T, &alpha, v, head_size, head_size * T, att, T, T, &beta, out, head_size, head_size, NH);
     if(status!=CUBLAS_STATUS_SUCCESS){
@@ -303,14 +351,17 @@ int main(){
     isequal(out, check_out, NH * head_size);
 
     //softmax check;
+    // T = 50324;
+    // float scale = 1.0 / sqrt(head_size);
     // float* in1, *in2;
     // cudaMalloc(&in1, NH * T * sizeof(float));
     // cudaMalloc(&in2, NH * T * sizeof(float));
 
     // cudaMemcpy(in1, in2, NH * T * sizeof(float), cudaMemcpyDeviceToDevice);
 
-    // softmax_kernel2<<<NH, 1024>>>(in1, T, NH, 11);
-    // softmax_kernel2<<<NH, 1024>>>(in2, T, NH, 11);
+    // softmax_kernel2<<<NH, 1024>>>(in1, T, NH, 11, scale);
+    // size_t memory = 2 * 1024 * sizeof(float) / 32;
+    // softmax_kernel3<<<NH, 1024, memory>>>(in2, T, NH, 11, scale);
 
     // float* check1 = (float*)malloc(NH * T * sizeof(float));
     // float* check2 = (float*)malloc(NH * T * sizeof(float));
