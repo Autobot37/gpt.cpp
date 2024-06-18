@@ -342,7 +342,7 @@ import tiktoken
 enc = tiktoken.get_encoding("gpt2")
 write_tokenizer(enc, "tokenizer.bin")
 
-model = GPT.from_pretrained('gpt2-medium')
+model = GPT.from_pretrained('gpt2')
 params_path = "params.bin"
 write_model(model, params_path)
 

@@ -82,10 +82,6 @@ int sample_argmax(float* probabilities, int n){
 
 int sample(Sampler* sampler, float* logits){
     int next;
-    for(int i = 0;i<sampler->vocab_size;i++){
-        logits[i] /= sampler->temprature;
-    }
-    softmax(logits, sampler->vocab_size);
     float coin = (float)rand() / RAND_MAX;
     if(CHECK){
         next = sample_argmax(logits, sampler->vocab_size);
@@ -332,7 +328,7 @@ float* forward(Model* model, int token, int pos){
 int* generate(Model* model, Tokenizer* tokenizer, int max_tokens, vector<int>& tokens, Sampler* sampler, int num_tokens){
     int* generated_tokens = (int*)malloc((max_tokens + num_tokens) * sizeof(int));
     float* logits = (float*)malloc(model->config.vocab_size * sizeof(float));
-
+    float inv_temp = 1.0 / sampler->temprature;
     int token = tokens[0];
     int pos = 0;
     int next;
@@ -342,6 +338,7 @@ int* generate(Model* model, Tokenizer* tokenizer, int max_tokens, vector<int>& t
     generated_tokens[pos] = token;
     while(pos < max_tokens + num_tokens - 1){
         float* gpu_logits = forward(model, token, pos);
+        softmax_kernel2<<<1, 1024>>>(gpu_logits, model->config.vocab_size, 1, sampler->vocab_size, inv_temp);
         cudaCheck(cudaMemcpy(logits, gpu_logits, model->config.vocab_size * sizeof(float), cudaMemcpyDeviceToHost));
 
         if(pos < num_tokens - 1){
@@ -461,7 +458,7 @@ int main(int argc, char* argv[]){
     CHECK = false;
 
     // chat(&model, &tokenizer, &sampler);
-    completion(&model, &tokenizer, &sampler, "The quick anon", 512);
+    completion(&model, &tokenizer, &sampler, "The quick retarded anon", 32);
 
     cublasDestroy(handle);
   
