@@ -178,75 +178,105 @@ void softmax_gpu(float* x, int N) {
 
 
 //-----------------------------------------------------------------------------------------------
+__global__
+void fill_cache(float* cache, float* arr, int l, int pos, int C, int NH, int T){
+    //arr to cache
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if(idx < C){
+        int head_size = C / NH;
+        int nh = idx / head_size;
+        int h = idx % head_size;
+        float* cache_l = cache + l * T * NH * head_size;
+        //from-> NH HS 
+        //to -> NH T HS
+        int from = nh * head_size + h;
+        int to = nh * T * head_size + pos * head_size + h;
+        cache_l[to] = arr[from];
+    }
+}
 
-
-__device__ void softmaxg(float* x, int N){
-    float max = x[0];
-    for(int i = 1;i<N;i++){
-        if(x[i] > max){
-            max = x[i];
+__global__ 
+void unfill_cache(float* cache, float* arr, int l, int pos, int C, int NH, int T){
+    //cache to arr
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if(idx < C){
+        int head_size = C / NH;
+        int nh = idx / head_size;
+        int h = idx % head_size;
+        float* cache_l = cache + l * T * NH * head_size;
+        //from-> NH T HS 
+        //to -> NH HS
+        int to = nh * head_size + h;
+        int from = nh * T * head_size + pos * head_size + h;
+        arr[to] = cache_l[from];
+    }
+}
+__global__
+void softmax_kernel(float* x, int T, int NH, int pos){
+    int idx = threadIdx.x;
+    if(idx < NH){
+        float* xh = x + idx * T;
+        float max = xh[0];
+        for(int t = 1;t<pos;t++){
+            if(xh[t] > max){
+                max = xh[t];
+            }
         }
-    }
-    float sum = 0.0;
-    for(int i = 0;i<N;i++){
-        x[i] = expf(x[i] - max);
-        sum += x[i];
-    }
-    for(int i = 0;i<N;i++){
-        x[i] /= sum;
+        float sum = 0;
+        for(int t = 0;t<pos;t++){
+            xh[t] = exp(xh[t] - max);
+            sum += xh[t];
+        }
+        for(int t = 0;t<T;t++){
+            if(t<pos){
+                xh[t] /= sum;
+            }
+            else{
+                xh[t] = 0;
+            }
+        }
     }
 }
 
 __global__
-void attention_kernel(float* out, float* att, float* qkv, float* key_cache, float* value_cache, int l, int pos, int C, int NH, int head_size, int T){
-
-    int h = threadIdx.x + blockIdx.x * blockDim.x;
-    if(h >= NH){
-        return;
-    }
-
-    float* q = qkv;
-    float scale = 1.0 / sqrt(head_size);
-
-    float* k = key_cache + l * C * T;
-    float* v = value_cache + l * C * T;
-
-
-    float* qh = q + h * head_size;
-    float* atth = att + h * T;
-
-    for(int t = 0;t<=pos;t++){
-        float* kh = k + t * C + h * head_size;
-        float score = 0.0f;
-        for(int i = 0;i<head_size;i++){
-            score += qh[i] * kh[i];
-        }
-        score *= scale;
-        atth[t] = score;
-    }
-    for(int t=pos+1;t<T;t++){
-        atth[t] = __int_as_float(0xff800000);
-    }
-
-    softmaxg(atth, T);
-
-    float* outh = out + h * head_size;
-    for(int t = 0;t<=pos;t++){
-        float* vh = v + t * C + h * head_size;
-        float score = atth[t];
-        for(int i = 0;i<head_size;i++){
-            outh[i] += score * vh[i];
-        }
+void scale_kernel(float* x, int T, int NH, float scale){
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if(idx < NH*T){
+        x[idx] *= scale;
     }
 }
 
-void attention_gpu(float* out, float* att, float* qkv, float* key_cache, float* value_cache, int l, int pos, int C, int NH, int head_size, int T){
-    int numThreads = 1024;
-    int blocks = (NH + numThreads - 1) / numThreads;
-    cudaMemset(out, 0, C * sizeof(float));
+void attention_blas(float* out, float* att, float* qkv, float* key_cache, float* value_cache, int l, int pos, int C, int NH, int T){
 
-    cudaMemcpy(key_cache + l * C * T + pos * C, qkv + C, C * sizeof(float), cudaMemcpyDeviceToDevice);
-    cudaMemcpy(value_cache + l * C * T + pos * C, qkv + 2*C, C * sizeof(float), cudaMemcpyDeviceToDevice);
-    attention_kernel<<<blocks, numThreads>>>(out, att, qkv, key_cache, value_cache, l, pos, C, NH, head_size, T);
+    int head_size = C / NH;
+    int numThreads = 1024;
+    int blocks = (C + numThreads - 1) / numThreads;
+    fill_cache<<<blocks, numThreads>>>(key_cache, qkv+C, l, pos, C, NH, T);
+    fill_cache<<<blocks, numThreads>>>(value_cache, qkv+2*C, l, pos, C, NH, T);
+
+    float* q = qkv;
+    float* k = key_cache + l * C * T;
+    float* v = value_cache + l * C * T;
+    //performing attention
+    //q [NH, 1, HS] @ K [NH, T, HS].T -> [NH, 1, T]
+    cublasHandle_t handle;
+    cublasCreate(&handle);
+    float alpha = 1.0;
+    float beta = 0.0;
+    cublasStatus_t status = cublasSgemmStridedBatched(handle, CUBLAS_OP_T, CUBLAS_OP_N, T, 1, head_size, &alpha, k, head_size, head_size * T, q, head_size, head_size, &beta, att, T, T, NH);
+    if(status!=CUBLAS_STATUS_SUCCESS){
+        cout << "CUBLAS error" << endl;
+    }
+    float scale = 1.0 / sqrt(head_size);
+    blocks = (NH * T + numThreads - 1) / numThreads;
+    scale_kernel<<<blocks, numThreads>>>(att, T, NH, scale);
+    
+    softmax_kernel<<<1, NH>>>(att, T, NH, pos+1);
+
+    status = cublasSgemmStridedBatched(handle, CUBLAS_OP_N, CUBLAS_OP_N, head_size, 1, T, &alpha, v, head_size, head_size * T, att, T, T, &beta, out, head_size, head_size, NH);
+    if(status!=CUBLAS_STATUS_SUCCESS){
+        cout << "CUBLAS error" << endl;
+    }
+    cublasDestroy(handle);
 }
 //-----------------------------------------------------------------------------------------------

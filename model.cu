@@ -310,7 +310,7 @@ float* forward(Model* model, int token, int pos){
 
         layernorm_gpu(a->residual1, a->x, w->ln_1_w + l*C, w->ln_1_b + l*C, C);
         gemm(a->qkv, a->residual1, w->c_attn_w + l*3*C*C, w->c_attn_b + l*3*C, 3*C, C);
-        attention_gpu(a->atty, a->att, a->qkv, a->key_cache, a->value_cache, l, pos, C, NH, head_size, T);
+        attention_blas(a->atty, a->att, a->qkv, a->key_cache, a->value_cache, l, pos, C, NH, T);
         gemm(a->attproj, a->atty, w->c_proj_w + l*C*C, w->c_proj_b + l*C, C, C);
         residual_gpu(a->x, a->attproj, C);
         layernorm_gpu(a->residual2, a->x, w->ln_2_w + l*C, w->ln_2_b + l*C, C);
@@ -358,7 +358,7 @@ int* generate(Model* model, Tokenizer* tokenizer, int max_tokens, vector<int>& t
         if(!CHECK)printf(COLOR_GREEN STYLE_BOLD "%s" COLOR_RESET, piece.c_str());
         fflush(stdout);
         generated_tokens[pos] = token;
-        if(!CHECK && token==1)break;
+        // if(!CHECK && token==1)break;
     }
     printf("\n");
     end = clock();
@@ -460,7 +460,8 @@ int main(int argc, char* argv[]){
     printf("-----------------------------\n");
     CHECK = false;
 
-    chat(&model, &tokenizer, &sampler);
+    // chat(&model, &tokenizer, &sampler);
+    completion(&model, &tokenizer, &sampler, "The quick anon", 512);
 
     cublasDestroy(handle);
   
