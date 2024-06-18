@@ -124,74 +124,23 @@ void gelu_gpu(float* x, int C){
     gelu_kernel<<<num_blocks, num_threads>>>(x, C);
 }
 //-----------------------------------------------------------------------------------------------
-__global__ void softmax_kernel(float* x, int N) {
-    int idx = threadIdx.x;
-    __shared__ float smax[1024];
-    __shared__ float ssum[1024];
-    
-    smax[idx] = -FLT_MAX; 
-    ssum[idx] = 0.0f;
-    __syncthreads();
 
-    for (int i = idx; i < N; i += blockDim.x) {
-        smax[idx] = fmaxf(smax[idx], x[i]);
-    }
-    __syncthreads();
-    
-    if (idx == 0) {
-        float maxval = -FLT_MAX;
-        for (int i = 0; i < blockDim.x; i++) {
-            maxval = fmaxf(maxval, smax[i]);
-        }
-        smax[0] = maxval;
-    }
-    __syncthreads();
-    
-    float maxval = smax[0];
-    float local_sum = 0.0f;
-    for (int i = idx; i < N; i += blockDim.x) {
-        x[i] = expf(x[i] - maxval);
-        local_sum += x[i];
-    }
-    ssum[idx] = local_sum;
-    __syncthreads();
-    
-    if (idx == 0) {
-        float sum = 0.0f;
-        for (int i = 0; i < blockDim.x; i++) {
-            sum += ssum[i];
-        }
-        ssum[0] = sum;
-    }
-    __syncthreads();
-    
-    float sum = ssum[0];
-    for (int i = idx; i < N; i += blockDim.x) {
-        x[i] /= sum;
-    }
-}
-
-void softmax_gpu(float* x, int N) {
-    int numThreads = 1024;
-    softmax_kernel<<<1, numThreads>>>(x, N);
-}
-
-
-//-----------------------------------------------------------------------------------------------
 __global__
-void fill_cache(float* cache, float* arr, int l, int pos, int C, int NH, int T){
+void fill_cache(float* key_cache, float* value_cache, float* arr, int l, int pos, int C, int NH, int T){
     //arr to cache
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if(idx < C){
         int head_size = C / NH;
         int nh = idx / head_size;
         int h = idx % head_size;
-        float* cache_l = cache + l * T * NH * head_size;
+        float* key_cache_l = key_cache + l * T * NH * head_size;
+        float* value_cache_l = value_cache + l * T * NH * head_size;
         //from-> NH HS 
         //to -> NH T HS
         int from = nh * head_size + h;
         int to = nh * T * head_size + pos * head_size + h;
-        cache_l[to] = arr[from];
+        key_cache_l[to] = arr[from + C];
+        value_cache_l[to] = arr[from + 2*C];
     }
 }
 
@@ -211,38 +160,129 @@ void unfill_cache(float* cache, float* arr, int l, int pos, int C, int NH, int T
         arr[to] = cache_l[from];
     }
 }
-__global__
-void softmax_kernel(float* x, int T, int NH, int pos){
+__global__ 
+void softmax_kernel2(float* x, int T, int NH, int pos, float scale){
+    //requires launch <<<NH, 1024>>>
+    int row = blockIdx.x;
     int idx = threadIdx.x;
-    if(idx < NH){
-        float* xh = x + idx * T;
-        float max = xh[0];
-        for(int t = 1;t<pos;t++){
-            if(xh[t] > max){
-                max = xh[t];
-            }
+    __shared__ float row_max[1024];
+    __shared__ float row_sum[1024];
+    row_max[threadIdx.x] = -FLT_MAX;
+    row_sum[threadIdx.x] = 0;
+    __syncthreads();
+    
+
+    for(int i = idx;i<pos;i+=blockDim.x){
+        x[row * T + i] *= scale;
+        float val = x[row * T + i];
+        row_max[idx] = fmaxf(row_max[idx], val);
+    }
+    __syncthreads();
+    if(idx==0){
+        float maxval = -FLT_MAX;
+        for(int i = 0;i<min(pos, blockDim.x);i++){
+            maxval = fmaxf(maxval, row_max[i]);
         }
+        row_max[0] = maxval;
+    }
+    __syncthreads();
+    float maxval = row_max[0];
+    
+    for(int i = idx;i<pos;i+=blockDim.x){
+        x[row * T + i] = expf(x[row * T + i] - maxval);
+        row_sum[idx] += x[row * T + i];
+    }
+    __syncthreads();
+    if(idx==0){
         float sum = 0;
-        for(int t = 0;t<pos;t++){
-            xh[t] = exp(xh[t] - max);
-            sum += xh[t];
+        for(int i = 0;i<min(pos,blockDim.x);i++){
+            sum += row_sum[i];
         }
-        for(int t = 0;t<T;t++){
-            if(t<pos){
-                xh[t] /= sum;
-            }
-            else{
-                xh[t] = 0;
-            }
+        row_sum[0] = sum;
+    }
+    __syncthreads();
+    float sum = row_sum[0];
+    for(int i = idx;i<T;i+=blockDim.x){
+        if(i<pos){
+            x[row * T + i] /= sum;
+        }
+        else{
+            x[row * T + i] = 0;
         }
     }
 }
 
+__device__ float warpReduceMax(float val){
+    for(int offset = 16; offset > 0; offset /= 2){
+        val = fmaxf(val, __shfl_down_sync(0xFFFFFFFF, val, offset));
+    }
+    return val;
+}
+__device__ float warpReduceSum(float val){
+    for(int offset = 16; offset > 0; offset /= 2){
+        val += __shfl_down_sync(0xFFFFFFFF, val, offset);
+    }
+    return val;
+}
+
 __global__
-void scale_kernel(float* x, int T, int NH, float scale){
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if(idx < NH*T){
-        x[idx] *= scale;
+void softmax_kernel3(float* x, int T, int NH, int pos, float scale){
+    int idx = blockIdx.x;
+    int tid = threadIdx.x;
+    int warpId = tid / 32;
+    int laneId = tid % 32;
+
+    int warpsPerBlock = blockDim.x / 32;
+
+    extern __shared__ float shared[];
+    float* maxvals = shared;
+    float* sumvals = &shared[warpsPerBlock];
+
+    float* x_h = x + idx * T;
+    float maxval = -FLT_MAX;
+    for(int i= tid;i<pos;i+=blockDim.x){
+        x_h[i] *= scale;
+        maxval = fmaxf(maxval, x_h[i]);
+    }
+    maxval = warpReduceMax(maxval);
+    if(laneId == 0){
+        maxvals[warpId] = maxval;
+    }
+    __syncthreads();
+    if(tid==0){
+        float val = -FLT_MAX;
+        for(int i = 0;i<warpsPerBlock;i++){
+            val = fmaxf(val, maxvals[i]);
+        }
+        maxvals[0] = val;
+    }
+    __syncthreads();
+    float offset = maxvals[0];
+
+    for(int i = tid;i<pos;i+=blockDim.x){
+        x_h[i] = expf(x_h[i] - offset);
+    }
+    //sum
+    float sumval = 0.0f;
+    for(int i = tid;i<pos;i+=blockDim.x){
+        sumval += x_h[i];
+    }
+    sumval = warpReduceSum(sumval);
+    if(laneId == 0){
+        sumvals[warpId] = sumval;
+    }
+    __syncthreads();
+    if(tid==0){
+        float val = 0;
+        for(int i = 0;i<warpsPerBlock;i++){
+            val += sumvals[i];
+        }
+        sumvals[0] = val;
+    }
+    __syncthreads();
+    float sum = sumvals[0];
+    for(int i = tid;i<T;i+=blockDim.x){
+        x_h[i] = (i<pos) ? x_h[i] / sum : 0;
     }
 }
 
@@ -251,8 +291,7 @@ void attention_blas(float* out, float* att, float* qkv, float* key_cache, float*
     int head_size = C / NH;
     int numThreads = 1024;
     int blocks = (C + numThreads - 1) / numThreads;
-    fill_cache<<<blocks, numThreads>>>(key_cache, qkv+C, l, pos, C, NH, T);
-    fill_cache<<<blocks, numThreads>>>(value_cache, qkv+2*C, l, pos, C, NH, T);
+    fill_cache<<<blocks, numThreads>>>(key_cache, value_cache, qkv, l, pos, C, NH, T);
 
     float* q = qkv;
     float* k = key_cache + l * C * T;
@@ -267,11 +306,9 @@ void attention_blas(float* out, float* att, float* qkv, float* key_cache, float*
     if(status!=CUBLAS_STATUS_SUCCESS){
         cout << "CUBLAS error" << endl;
     }
-    float scale = 1.0 / sqrt(head_size);
-    blocks = (NH * T + numThreads - 1) / numThreads;
-    scale_kernel<<<blocks, numThreads>>>(att, T, NH, scale);
-    
-    softmax_kernel<<<1, NH>>>(att, T, NH, pos+1);
+    float scale = 1.0 / sqrt(head_size);    
+    size_t memory = 2 * 512 * sizeof(float) / 32;
+    softmax_kernel3<<<NH, 512, memory>>>(att, T, NH, pos+1, scale);
 
     status = cublasSgemmStridedBatched(handle, CUBLAS_OP_N, CUBLAS_OP_N, head_size, 1, T, &alpha, v, head_size, head_size * T, att, T, T, &beta, out, head_size, head_size, NH);
     if(status!=CUBLAS_STATUS_SUCCESS){
@@ -280,3 +317,9 @@ void attention_blas(float* out, float* att, float* qkv, float* key_cache, float*
     cublasDestroy(handle);
 }
 //-----------------------------------------------------------------------------------------------
+
+void softmax_gpu(float* x, int N) {
+    size_t memory = 2 * 512 * sizeof(float) / 32;
+    softmax_kernel3<<<1, 512, memory>>>(x, N, 1, N, 1.0f);
+}
+

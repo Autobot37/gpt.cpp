@@ -466,5 +466,5 @@ int main(int argc, char* argv[]){
     cublasDestroy(handle);
   
     return 0;
-
+    
 }

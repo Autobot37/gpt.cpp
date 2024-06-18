@@ -1,5 +1,8 @@
 #include <cuda_runtime.h>
 #include <iostream>
+#include <cublas_v2.h>
+#include <float.h>
+#include <assert.h>
 using namespace std;
 
 void rand_init(float* x, int n){
@@ -8,19 +11,26 @@ void rand_init(float* x, int n){
     }
 }
 
-
 void isequal(float* a, float* b, int n){
     float maxval = -INFINITY;
     for(int i = 0;i<n;i++){
         maxval = fmaxf(maxval, fmaxf(a[i], b[i]));
     }
     float eps = 1e-5;
+    
     for(int i = 0;i<n;i++){
         if(fabs(a[i] - b[i]) > eps * (maxval + 1)){
-            cout << "Mismatch at index " << i << " CPU: " << a[i] << " GPU: " << b[i] << endl;
+            cout << "Mismatches" << endl;
+            for(int j = i;j<min(n, i+10);j++){
+                cout << a[j] << " " << b[j] << endl;
+            }
+            return;
         }
     }
-    cout << "Done" << endl;
+    cout << "Results match " << endl;
+    for(int i = 0;i<4;i++){
+        cout << a[i] << " " << b[i] << endl;
+    }
 }
 
 void softmax(float* x, int N){
@@ -40,7 +50,9 @@ void softmax(float* x, int N){
     }
 }
 
-void attention(float* out, float* att, float* qkv, float* key_cache, float* value_cache, int l, int pos, int C, int NH, int head_size, int T){
+void attention(float* out, float* att, float* qkv, float* key_cache, float* value_cache, int l, int pos, int C, int NH, int T){
+
+    int head_size = C / NH;
 
     float* q = qkv;
     memcpy(key_cache + l * C * T + pos * C, qkv + C, C * sizeof(float));
@@ -58,7 +70,7 @@ void attention(float* out, float* att, float* qkv, float* key_cache, float* valu
         float* qh = q + h * head_size;
         float* atth = att + h * T;
 
-        for(int t = 0;t<=pos;t++){
+        for(int t = 0;t<T;t++){
             float* kh = k + t * C + h * head_size;
             float score = 0.0f;
             for(int i = 0;i<head_size;i++){
@@ -68,14 +80,14 @@ void attention(float* out, float* att, float* qkv, float* key_cache, float* valu
             atth[t] = score;
         }
         for(int t=pos+1;t<T;t++){
-            atth[t] = -INFINITY;
+            atth[t] = -FLT_MAX;
         }
 
         softmax(atth, T);
 
         float* outh = out + h * head_size;
         memset(outh, 0, head_size * sizeof(float));
-        for(int t = 0;t<=pos;t++){
+        for(int t = 0;t<T;t++){
             float* vh = v + t * C + h * head_size;
             float score = atth[t];
             for(int i = 0;i<head_size;i++){
@@ -85,113 +97,227 @@ void attention(float* out, float* att, float* qkv, float* key_cache, float* valu
     }
 }
 
-__device__ void softmaxg(float* x, int N){
-    float max = x[0];
-    for(int i = 1;i<N;i++){
-        if(x[i] > max){
-            max = x[i];
-        }
-    }
-    float sum = 0;
-    for(int i = 0;i<N;i++){
-        x[i] = exp(x[i] - max);
-        sum += x[i];
-    }
-    for(int i = 0;i<N;i++){
-        x[i] /= sum;
-    }
-}
+/*
+Plan : 
+qkv is shape of 3 * C
+fill qkv_k into key_cache
+fill qkv_v into value_cache
+now the problem is caches are of size L * T * NH * HS
+but we need caches to be of size L * NH * T * HS
+so we directly copy permuted qkv to caches for every position for every layer
+this way caches remain in shape L * NH * T * HS
+simply do cublas gemm to get the attention scores.
+*/
 
 __global__
-void attention_kernel(float* out, float* att, float* qkv, float* key_cache, float* value_cache, int l, int pos, int C, int NH, int head_size, int T){
-
-    int h = threadIdx.x + blockIdx.x * blockDim.x;
-    if(h >= NH){
-        return;
+void fill_cache(float* key_cache, float* value_cache, float* arr, int l, int pos, int C, int NH, int T){
+    //arr to cache
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if(idx < C){
+        int head_size = C / NH;
+        int nh = idx / head_size;
+        int h = idx % head_size;
+        float* key_cache_l = key_cache + l * T * NH * head_size;
+        float* value_cache_l = value_cache + l * T * NH * head_size;
+        //from-> NH HS 
+        //to -> NH T HS
+        int from = nh * head_size + h;
+        int to = nh * T * head_size + pos * head_size + h;
+        key_cache_l[to] = arr[from + C];
+        value_cache_l[to] = arr[from + 2*C];
     }
+}
+
+__global__ 
+void unfill_cache(float* cache, float* arr, int l, int pos, int C, int NH, int T){
+    //cache to arr
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if(idx < C){
+        int head_size = C / NH;
+        int nh = idx / head_size;
+        int h = idx % head_size;
+        float* cache_l = cache + l * T * NH * head_size;
+        //from-> NH T HS 
+        //to -> NH HS
+        int to = nh * head_size + h;
+        int from = nh * T * head_size + pos * head_size + h;
+        arr[to] = cache_l[from];
+    }
+}
+__global__
+void softmax_kernel(float* x, int T, int NH, int pos){
+    int idx = threadIdx.x;
+    if(idx < NH){
+        float* xh = x + idx * T;
+        float max = xh[0];
+        for(int t = 1;t<pos;t++){
+            if(xh[t] > max){
+                max = xh[t];
+            }
+        }
+        float sum = 0;
+        for(int t = 0;t<pos;t++){
+            xh[t] = exp(xh[t] - max);
+            sum += xh[t];
+        }
+        for(int t = 0;t<T;t++){
+            if(t<pos){
+                xh[t] /= sum;
+            }
+            else{
+                xh[t] = 0;
+            }
+        }
+    }
+}
+
+__global__ 
+void softmax_kernel2(float* x, int T, int NH, int pos, float scale){
+    //requires launch <<<NH, 1024>>>
+    int row = blockIdx.x;
+    int idx = threadIdx.x;
+    __shared__ float row_max[1024];
+    __shared__ float row_sum[1024];
+    row_max[threadIdx.x] = -FLT_MAX;
+    row_sum[threadIdx.x] = 0;
+    __syncthreads();
+    
+
+    for(int i = idx;i<pos;i+=blockDim.x){
+        x[row * T + i] *= scale;
+        float val = x[row * T + i];
+        row_max[idx] = fmaxf(row_max[idx], val);
+    }
+    __syncthreads();
+    if(idx==0){
+        float maxval = -FLT_MAX;
+        for(int i = 0;i<min(pos, blockDim.x);i++){
+            maxval = fmaxf(maxval, row_max[i]);
+        }
+        row_max[0] = maxval;
+    }
+    __syncthreads();
+    float maxval = row_max[0];
+    
+    for(int i = idx;i<pos;i+=blockDim.x){
+        x[row * T + i] = exp(x[row * T + i] - maxval);
+        row_sum[idx] += x[row * T + i];
+    }
+    __syncthreads();
+    if(idx==0){
+        float sum = 0;
+        for(int i = 0;i<min(pos,blockDim.x);i++){
+            sum += row_sum[i];
+        }
+        row_sum[0] = sum;
+    }
+    __syncthreads();
+    float sum = row_sum[0];
+    for(int i = idx;i<T;i+=blockDim.x){
+        if(i<pos){
+            x[row * T + i] /= sum;
+        }
+        else{
+            x[row * T + i] = 0;
+        }
+    }
+}
+
+void attention_gpu(float* out, float* att, float* qkv, float* key_cache, float* value_cache, int l, int pos, int C, int NH, int T){
+
+    int head_size = C / NH;
+    int numThreads = 1024;
+    int blocks = (C + numThreads - 1) / numThreads;
+    fill_cache<<<blocks, numThreads>>>(key_cache, value_cache, qkv, l, pos, C, NH, T);
 
     float* q = qkv;
-    float scale = 1.0 / sqrt(head_size);
-
     float* k = key_cache + l * C * T;
     float* v = value_cache + l * C * T;
-
-
-    float* qh = q + h * head_size;
-    float* atth = att + h * T;
-
-    for(int t = 0;t<=pos;t++){
-        float* kh = k + t * C + h * head_size;
-        float score = 0.0f;
-        for(int i = 0;i<head_size;i++){
-            score += qh[i] * kh[i];
-        }
-        score *= scale;
-        atth[t] = score;
+    //performing attention
+    //q [NH, 1, HS] @ K [NH, T, HS].T -> [NH, 1, T]
+    cublasHandle_t handle;
+    cublasCreate(&handle);
+    float alpha = 1.0;
+    float beta = 0.0;
+    cublasStatus_t status = cublasSgemmStridedBatched(handle, CUBLAS_OP_T, CUBLAS_OP_N, T, 1, head_size, &alpha, k, head_size, head_size * T, q, head_size, head_size, &beta, att, T, T, NH);
+    if(status!=CUBLAS_STATUS_SUCCESS){
+        cout << "CUBLAS error" << endl;
     }
-    for(int t=pos+1;t<T;t++){
-        atth[t] = -INFINITY;
-    }
+    float scale = 1.0 / sqrt(head_size);    
+    softmax_kernel2<<<NH, 1024>>>(att, T, NH, pos+1, scale);
 
-    softmaxg(atth, T);
-
-    float* outh = out + h * head_size;
-    for(int t = 0;t<=pos;t++){
-        float* vh = v + t * C + h * head_size;
-        float score = atth[t];
-        for(int i = 0;i<head_size;i++){
-            outh[i] += score * vh[i];
-        }
+    status = cublasSgemmStridedBatched(handle, CUBLAS_OP_N, CUBLAS_OP_N, head_size, 1, T, &alpha, v, head_size, head_size * T, att, T, T, &beta, out, head_size, head_size, NH);
+    if(status!=CUBLAS_STATUS_SUCCESS){
+        cout << "CUBLAS error" << endl;
     }
+    cublasDestroy(handle);
 }
-
-void attention_gpu(float* out, float* att, float* qkv, float* key_cache, float* value_cache, int l, int pos, int C, int NH, int head_size, int T){
-    int numThreads = 1024;
-    int blocks = (NH + numThreads - 1) / numThreads;
-    cudaMemcpy(key_cache + l * C * T + pos * C, qkv + C, C * sizeof(float), cudaMemcpyDeviceToDevice);
-    cudaMemcpy(value_cache + l * C * T + pos * C, qkv + 2*C, C * sizeof(float), cudaMemcpyDeviceToDevice);
-    cudaMemset(out, 0, C * sizeof(float));
-    attention_kernel<<<blocks, numThreads>>>(out, att, qkv, key_cache, value_cache, l, pos, C, NH, head_size, T);
-}
-
 int main(){
     
-    int l = 0;
-    int pos = 0;
-    int C = 768;
-    int NH = 12;
-    int head_size = 64;
-    int T = 512;
-    int L = 12;
-    float* out = (float*)malloc(NH * head_size * sizeof(float));
-    float* att = (float*)malloc(NH * T * sizeof(float));
-    float* qkv = (float*)malloc(3 * C * sizeof(float));
-    float* key_cache = (float*)malloc(L * C * T * sizeof(float));
-    float* value_cache = (float*)malloc(L * C * T * sizeof(float));
+    int C = 1024;
+    int NH = 16;
+    int head_size = C / NH;
+    int T = 1200;
+    int L = 8;
 
-    rand_init(qkv, 3 * C);
-    rand_init(key_cache, L * C * T);
-    rand_init(value_cache, L * C * T);
 
-    attention(out, att, qkv, key_cache, value_cache, l, pos, C, NH, head_size, T);
-
+    float* out, *att, *qkv, *key_cache, *value_cache;
     float* d_out, *d_att, *d_qkv, *d_key_cache, *d_value_cache;
-    cudaMalloc(&d_out, NH * head_size * sizeof(float));
-    cudaMalloc(&d_att, NH * T * sizeof(float));
-    cudaMalloc(&d_qkv, 3 * C * sizeof(float));
-    cudaMalloc(&d_key_cache, L * C * T * sizeof(float));
-    cudaMalloc(&d_value_cache, L * C * T * sizeof(float));
 
-    cudaMemcpy(d_qkv, qkv, 3 * C * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_key_cache, key_cache, L * C * T * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_value_cache, value_cache, L * C * T * sizeof(float), cudaMemcpyHostToDevice);
+    if(true){
+        out = (float*)malloc(NH * head_size * sizeof(float));
+        att = (float*)malloc(NH * T * sizeof(float));
+        qkv = (float*)malloc(3 * C * sizeof(float));
+        key_cache = (float*)malloc(L * NH * T * head_size * sizeof(float));
+        value_cache = (float*)malloc(L * NH * T * head_size * sizeof(float));
 
-    attention_gpu(d_out, d_att, d_qkv, d_key_cache, d_value_cache, l, pos, C, NH, head_size, T);
+        rand_init(qkv, 3 * C);
+        memset(key_cache, 0, L * NH * T * head_size * sizeof(float));
+        memset(value_cache, 0, L * NH * T * head_size * sizeof(float));
 
-    float* check = (float*)malloc(NH * head_size * sizeof(float));
-    cudaMemcpy(check, d_out, NH * head_size * sizeof(float), cudaMemcpyDeviceToHost);
+        cudaMalloc(&d_out, NH * head_size * sizeof(float));
+        cudaMalloc(&d_att, NH * T * sizeof(float));
+        cudaMalloc(&d_qkv, 3 * C * sizeof(float));
+        cudaMalloc(&d_key_cache, L * NH * T * head_size * sizeof(float));
+        cudaMalloc(&d_value_cache, L * NH * T * head_size * sizeof(float));
 
-    isequal(out, check, NH * head_size);
+        cudaMemcpy(d_qkv, qkv, 3 * C * sizeof(float), cudaMemcpyHostToDevice);
+        cudaMemcpy(d_key_cache, key_cache, L * NH * T * head_size * sizeof(float), cudaMemcpyHostToDevice);
+        cudaMemcpy(d_value_cache, value_cache, L * NH * T * head_size * sizeof(float), cudaMemcpyHostToDevice);
+    }
+    
+    
+    int l = 7;
+    int pos = 1023;
+
+    attention(out, att, qkv, key_cache, value_cache, l, pos, C, NH, T);
+    attention_gpu(d_out, d_att, d_qkv, d_key_cache, d_value_cache, l, pos, C, NH, T);
+
+
+    float* check_att = (float*)malloc(NH * T * sizeof(float));
+    cudaMemcpy(check_att, d_att, NH * T * sizeof(float), cudaMemcpyDeviceToHost);
+    isequal(att, check_att, NH * T);
+
+    float* check_out = (float*)malloc(NH * head_size * sizeof(float));
+    cudaMemcpy(check_out, d_out, NH * head_size * sizeof(float), cudaMemcpyDeviceToHost);
+    isequal(out, check_out, NH * head_size);
+
+    //softmax check;
+    // float* in1, *in2;
+    // cudaMalloc(&in1, NH * T * sizeof(float));
+    // cudaMalloc(&in2, NH * T * sizeof(float));
+
+    // cudaMemcpy(in1, in2, NH * T * sizeof(float), cudaMemcpyDeviceToDevice);
+
+    // softmax_kernel2<<<NH, 1024>>>(in1, T, NH, 11);
+    // softmax_kernel2<<<NH, 1024>>>(in2, T, NH, 11);
+
+    // float* check1 = (float*)malloc(NH * T * sizeof(float));
+    // float* check2 = (float*)malloc(NH * T * sizeof(float));
+    // cudaMemcpy(check1, in1, NH * T * sizeof(float), cudaMemcpyDeviceToHost);
+    // cudaMemcpy(check2, in2, NH * T * sizeof(float), cudaMemcpyDeviceToHost);
+
+    // isequal(check1, check2, NH * T);
 
 
     return 0;
