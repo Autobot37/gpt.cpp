@@ -458,7 +458,7 @@ int main(int argc, char* argv[]){
     CHECK = false;
 
     // chat(&model, &tokenizer, &sampler);
-    completion(&model, &tokenizer, &sampler, "The quick retarded anon", 32);
+    completion(&model, &tokenizer, &sampler, "The quick anon", 32);
 
     cublasDestroy(handle);
   
