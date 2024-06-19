@@ -36,4 +36,4 @@ jobs:
               run: python3 test.py
             
             - name: Compile and run
-              run: make run_cpu && ./executable
+              run: make run_cpu 
