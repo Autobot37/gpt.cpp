@@ -457,8 +457,10 @@ int main(int argc, char* argv[]){
     printf("-----------------------------\n");
     CHECK = false;
 
-    // chat(&model, &tokenizer, &sampler);
-    completion(&model, &tokenizer, &sampler, "The quick anon", 32);
+    printf("\033[H\033[J");
+
+    completion(&model, &tokenizer, &sampler, "Let me sing a song for you", 128);
+    chat(&model, &tokenizer, &sampler);
 
     cublasDestroy(handle);
   

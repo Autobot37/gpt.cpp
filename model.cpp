@@ -327,7 +327,10 @@ int* generate(Model* model, Tokenizer* tokenizer, int max_tokens, vector<int>& t
     int pos = 0;
     int next;
     clock_t start, end;
-    start = clock();
+    #pragma omp master
+    {
+        start = clock();
+    }
     if(!CHECK)printf(COLOR_GREEN STYLE_BOLD "%s" COLOR_RESET, tokenizer->decode(token, token).c_str());
     generated_tokens[pos] = token;
     while(pos < max_tokens + num_tokens - 1){
@@ -350,10 +353,13 @@ int* generate(Model* model, Tokenizer* tokenizer, int max_tokens, vector<int>& t
         if(!CHECK && token==1)break;
     }
     printf("\n");
-    end = clock();
-    double time_taken = ((double)end - start) / CLOCKS_PER_SEC;
-    double one_token = (time_taken / max_tokens) * 1000;
-    printf("One token took %.6f ms\n", one_token);
+    #pragma omp master
+    {
+        end = clock();
+        double time_taken = ((double)end - start) / CLOCKS_PER_SEC;
+        double one_token = (time_taken / max_tokens) * 1000;
+        printf("One token took %.6f ms\n", one_token);
+    }
 
     return generated_tokens;
 }
@@ -446,7 +452,10 @@ int main(){
     printf("-----------------------------\n");
     CHECK = false;
 
-    completion(&model, &tokenizer, &sampler, "The quick brown fox", 128);
+    printf("\033[H\033[J");
+    completion(&model, &tokenizer, &sampler, "Let me sing a song for you", 128);
+    chat(&model, &tokenizer, &sampler);
+
 
     return 0;
 

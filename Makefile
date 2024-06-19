@@ -3,7 +3,7 @@ CUDA_SRC ?= model.cu
 
 CC = g++
 CFLAGS = -march=native -ffast-math -O3 
-LDFLAGS = -lm -fopenmp
+LDFLAGS = -lm 
 
 NVCCFLAGS = -O3 --use_fast_math
 CUDA_LDFLAGS = -lcublas --expt-relaxed-constexpr
