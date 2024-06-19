@@ -452,6 +452,7 @@ int main(){
     printf("-----------------------------\n");
     CHECK = false;
 
+    printf("\033[H\033[J");
     completion(&model, &tokenizer, &sampler, "Let me sing a song for you", 128);
     chat(&model, &tokenizer, &sampler);
 
