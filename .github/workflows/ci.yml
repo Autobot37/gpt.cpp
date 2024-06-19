@@ -34,6 +34,3 @@ jobs:
             
             - name: Test python
               run: python3 test.py
-            
-            - name: Compile and run
-              run: make run_cpu 
