@@ -37,4 +37,4 @@ clean:
 	rm -f $(EXECUTABLE) gmon.out
 	rm -f gpt2.o
 
-.PHONY: run_cpu run_gpu profile_cpu profile_cuda clean
+.PHONY: run_cpu run_cuda profile_cpu profile_cuda clean
