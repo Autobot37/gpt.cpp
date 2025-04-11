@@ -17,6 +17,7 @@ Global structure is based on karpathy llm.c inference only implementation + addi
 # To run GPU version
 ```bash
 git clone -b master https://github.com/Autobot37/gpt.cpp
+cd gpt.cpp
 pip install -r requirements.txt
 python3 pythonscripts/model.py
 make run_cuda
@@ -25,6 +26,7 @@ make run_cuda
 # To run CPU version
 ```bash
 git clone -b master https://github.com/Autobot37/gpt.cpp
+cd gpt.cpp
 pip install -r requirements.txt
 python3 pythonscripts/model.py
 make run_cpu
